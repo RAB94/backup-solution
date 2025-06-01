@@ -22,6 +22,7 @@ class PlatformType(enum.Enum):
     VMWARE = "vmware"
     PROXMOX = "proxmox"
     XCPNG = "xcpng"
+    UBUNTU = "ubuntu"  # Added Ubuntu platform type
 
 class BackupJobStatus(enum.Enum):
     PENDING = "pending"

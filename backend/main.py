@@ -1,4 +1,4 @@
-# Updated main.py with automatic VM discovery and better persistence
+# Updated main.py with automatic VM discovery and better persistence, storage management, and restore features
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +31,7 @@ from database import (
 from platform_connectors import VMwareConnector, ProxmoxConnector, XCPNGConnector
 from ubuntu_backup import UbuntuBackupConnector, UbuntuNetworkDiscovery
 from backup_engine import BackupEngine
+from storage_manager import StorageManager, LocalStorageBackend, NFSStorageBackend, ISCSIStorageBackend
 from auth import (
     User, UserCreate, UserLogin, UserResponse, Token,
     create_access_token, create_refresh_token, get_current_user,
@@ -714,7 +715,7 @@ async def run_backup_job(
         db.commit()
         
         # Run backup in background with status updates
-        background_tasks.add_task(run_backup_with_status_updates, job, backup_record.id, db)
+        background_tasks.add_task(run_backup_with_status_updates, job_id, backup_record.id)
         
         logger.info(f"Started backup job: {job.name}")
         return {"message": "Backup job started", "job_id": job_id, "backup_record_id": backup_record.id}
@@ -724,49 +725,58 @@ async def run_backup_job(
         logger.error(f"Error running backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def run_backup_with_status_updates(job: BackupJob, backup_record_id: int, db: Session):
+async def run_backup_with_status_updates(job_id: int, backup_record_id: int):
     """Run backup job and update status in database"""
+    # Get fresh database session for background task
+    db = next(get_db())
     try:
         backup_engine = app.state.backup_engine
+        
+        # Get fresh job object
+        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+        backup_record = db.query(BackupRecord).filter(BackupRecord.id == backup_record_id).first()
+        
+        if not job or not backup_record:
+            logger.error(f"Job {job_id} or backup record {backup_record_id} not found")
+            return
         
         # Run the actual backup
         result = await backup_engine.run_backup(job)
         
         # Update job and record status based on result
-        db.refresh(job)
-        backup_record = db.query(BackupRecord).filter(BackupRecord.id == backup_record_id).first()
-        
         if result["status"] == "success":
             job.status = BackupJobStatus.COMPLETED
-            if backup_record:
-                backup_record.status = "completed"
-                backup_record.end_time = datetime.now()
-                backup_record.size_mb = result.get("size_mb", 0)
-                backup_record.file_path = result.get("path", "")
+            backup_record.status = "completed"
+            backup_record.end_time = datetime.now()
+            backup_record.size_mb = result.get("size_mb", 0)
+            backup_record.file_path = result.get("path", "")
+            logger.info(f"Backup job {job_id} completed successfully")
         else:
             job.status = BackupJobStatus.FAILED
-            if backup_record:
-                backup_record.status = "failed" 
-                backup_record.end_time = datetime.now()
-                backup_record.error_message = result.get("error", "Unknown error")
+            backup_record.status = "failed" 
+            backup_record.end_time = datetime.now()
+            backup_record.error_message = result.get("error", "Unknown error")
+            logger.error(f"Backup job {job_id} failed: {result.get('error')}")
         
         db.commit()
-        logger.info(f"Backup job {job.id} completed with status: {result['status']}")
         
     except Exception as e:
-        logger.error(f"Backup job {job.id} failed with exception: {e}")
+        logger.error(f"Backup job {job_id} failed with exception: {e}")
         
         # Update status to failed
-        db.refresh(job)
-        job.status = BackupJobStatus.FAILED
-        
+        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
         backup_record = db.query(BackupRecord).filter(BackupRecord.id == backup_record_id).first()
+        
+        if job:
+            job.status = BackupJobStatus.FAILED
         if backup_record:
             backup_record.status = "failed"
             backup_record.end_time = datetime.now()
             backup_record.error_message = str(e)
         
         db.commit()
+    finally:
+        db.close()
 
 @app.delete("/api/v1/backup-jobs/{job_id}")
 async def delete_backup_job(
@@ -997,8 +1007,7 @@ async def instant_restore_vm(
             backup_id, 
             PlatformType(target_platform), 
             restore_config,
-            restore_record.id,
-            db
+            restore_record.id
         )
         
         logger.info(f"Started instant restore for backup {backup_id}")
@@ -1016,8 +1025,9 @@ async def instant_restore_vm(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def perform_instant_restore(backup_id: str, target_platform: PlatformType, 
-                                restore_config: dict, restore_record_id: int, db: Session):
+                                restore_config: dict, restore_record_id: int):
     """Perform the actual instant restore operation"""
+    db = next(get_db())
     try:
         backup_engine = app.state.backup_engine
         
@@ -1050,6 +1060,8 @@ async def perform_instant_restore(backup_id: str, target_platform: PlatformType,
             restore_record.error_message = str(e)
         
         db.commit()
+    finally:
+        db.close()
 
 @app.post("/api/v1/restore/files")
 async def file_level_restore(
@@ -1093,8 +1105,7 @@ async def file_level_restore(
             backup_id, 
             file_paths, 
             target_path,
-            restore_record.id,
-            db
+            restore_record.id
         )
         
         logger.info(f"Started file-level restore for backup {backup_id}")
@@ -1111,8 +1122,9 @@ async def file_level_restore(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def perform_file_restore(backup_id: str, file_paths: List[str], target_path: str, 
-                             restore_record_id: int, db: Session):
+                             restore_record_id: int):
     """Perform the actual file-level restore operation"""
+    db = next(get_db())
     try:
         backup_engine = app.state.backup_engine
         
@@ -1142,6 +1154,8 @@ async def perform_file_restore(backup_id: str, file_paths: List[str], target_pat
             restore_record.error_message = str(e)
         
         db.commit()
+    finally:
+        db.close()
 
 @app.get("/api/v1/restore/history")
 async def get_restore_history(
@@ -1173,6 +1187,7 @@ async def get_restore_history(
     except Exception as e:
         logger.error(f"Error getting restore history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/v1/statistics")
 async def get_statistics(db: Session = Depends(get_db)):
     """Get backup system statistics from database"""

@@ -1,4 +1,4 @@
-# backup_engine.py
+# Updated backup_engine.py - Fixed Storage Manager Integration
 import asyncio
 import logging
 import hashlib
@@ -15,21 +15,26 @@ from platform_connectors import BasePlatformConnector
 logger = logging.getLogger(__name__)
 
 class BackupEngine:
-    """Core backup engine that orchestrates backup operations"""
+    """Core backup engine that orchestrates backup operations with storage manager integration"""
     
-    def __init__(self, platform_connectors: Dict[PlatformType, BasePlatformConnector]):
+    def __init__(self, platform_connectors: Dict[PlatformType, BasePlatformConnector], storage_manager=None):
         self.connectors = platform_connectors
+        self.storage_manager = storage_manager
         self.backup_storage_path = Path("./backups")
         self.backup_storage_path.mkdir(exist_ok=True)
         
     async def run_backup(self, backup_job) -> Dict[str, Any]:
-        """Execute a backup job"""
+        """Execute a backup job with proper storage management"""
         job_id = backup_job.id
         logger.info(f"Starting backup job {job_id}: {backup_job.name}")
         
         try:
             # Get platform connector
-            connector = self.connectors[backup_job.platform]
+            if backup_job.platform.value == 'ubuntu':
+                platform_key = 'ubuntu'
+            else:
+                platform_key = backup_job.platform
+            connector = self.connectors[platform_key]
             
             if not connector.connected:
                 raise Exception(f"Not connected to {backup_job.platform}")
@@ -37,7 +42,7 @@ class BackupEngine:
             # Generate backup ID
             backup_id = str(uuid.uuid4())
             
-            # Create backup directory
+            # Create backup directory (local temp storage)
             backup_dir = self.backup_storage_path / backup_id
             backup_dir.mkdir(exist_ok=True)
             
@@ -97,12 +102,28 @@ class BackupEngine:
             if backup_job.encryption_enabled:
                 await self._encrypt_backup(backup_dir)
             
+            # Store backup using storage manager (if available)
+            final_storage_path = str(backup_dir)
+            if self.storage_manager:
+                try:
+                    final_storage_path = await self.storage_manager.store_backup(
+                        str(backup_dir), backup_id
+                    )
+                    logger.info(f"Backup stored using storage manager: {final_storage_path}")
+                except Exception as storage_error:
+                    logger.warning(f"Storage manager failed, using local storage: {storage_error}")
+            
             logger.info(f"Backup job {job_id} completed successfully")
             return {
                 "status": "success",
                 "backup_id": backup_id,
                 "size_mb": backup_size,
-                "path": str(backup_dir)
+                "path": final_storage_path,
+                "vm_name": vm_details.get("name", job.vm_id),
+                "platform": job.platform.value,
+                "backup_type": job.backup_type.value,
+                "compression_enabled": job.compression_enabled,
+                "encryption_enabled": job.encryption_enabled
             }
             
         except Exception as e:
@@ -188,23 +209,36 @@ class BackupEngine:
         
         return total_size // (1024 * 1024)  # Convert to MB
     
-    async def instant_restore(self, backup_id: str, target_platform: PlatformType, restore_config: Dict[str, Any]):
-        """Perform instant VM restore"""
-        logger.info(f"Starting instant restore for backup {backup_id}")
+    async def instant_restore_from_path(self, backup_path: str, target_platform: PlatformType, 
+                                       restore_config: Dict[str, Any], backup_metadata: Dict[str, Any] = None):
+        """Perform instant VM restore from a specific backup path"""
+        logger.info(f"Starting instant restore from path {backup_path}")
         
         try:
-            # Find backup directory
-            backup_dir = self.backup_storage_path / backup_id
-            if not backup_dir.exists():
-                raise Exception(f"Backup {backup_id} not found")
+            backup_dir = Path(backup_path)
             
-            # Load backup metadata
+            if not backup_dir.exists():
+                raise Exception(f"Backup path {backup_path} does not exist")
+            
+            # Load backup metadata if available
             metadata_file = backup_dir / "backup_metadata.json"
-            with open(metadata_file, 'r') as f:
-                metadata = json.load(f)
+            metadata = {}
+            
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+            elif backup_metadata:
+                metadata = backup_metadata
             
             # Get target platform connector
-            connector = self.connectors[target_platform]
+            if target_platform.value == 'ubuntu':
+                platform_key = 'ubuntu'
+            else:
+                platform_key = target_platform
+            connector = self.connectors[platform_key]
+            
+            if not connector.connected:
+                raise Exception(f"Not connected to target platform {target_platform}")
             
             # Decrypt if needed
             if metadata.get("encrypted"):
@@ -228,6 +262,44 @@ class BackupEngine:
             logger.error(f"Instant restore failed: {e}")
             raise
     
+    async def instant_restore(self, backup_id: str, target_platform: PlatformType, restore_config: Dict[str, Any]):
+        """Perform instant VM restore with storage manager support (legacy method)"""
+        logger.info(f"Starting instant restore for backup {backup_id}")
+        
+        try:
+            # Find backup using storage manager or local storage
+            backup_dir = None
+            
+            if self.storage_manager:
+                # Try to retrieve from storage manager
+                temp_restore_dir = self.backup_storage_path / f"restore-{backup_id}"
+                temp_restore_dir.mkdir(exist_ok=True)
+                
+                success = await self.storage_manager.retrieve_backup(
+                    backup_id, str(temp_restore_dir)
+                )
+                
+                if success:
+                    backup_dir = temp_restore_dir
+                    logger.info(f"Retrieved backup from storage manager")
+                else:
+                    logger.warning("Failed to retrieve from storage manager, trying local")
+            
+            # Fallback to local storage
+            if not backup_dir:
+                local_backup_dir = self.backup_storage_path / backup_id
+                if local_backup_dir.exists():
+                    backup_dir = local_backup_dir
+                else:
+                    raise Exception(f"Backup {backup_id} not found in any storage")
+            
+            # Use the new restore method
+            return await self.instant_restore_from_path(str(backup_dir), target_platform, restore_config)
+            
+        except Exception as e:
+            logger.error(f"Instant restore failed: {e}")
+            raise
+    
     async def _decrypt_backup(self, backup_dir: Path):
         """Decrypt backup files"""
         logger.info("Decrypting backup files")
@@ -239,14 +311,35 @@ class BackupEngine:
         await asyncio.sleep(1)  # Simulate decompression time
     
     async def file_restore(self, backup_id: str, file_paths: List[str], target_path: str):
-        """Perform file-level restore"""
+        """Perform file-level restore with storage manager support"""
         logger.info(f"Starting file-level restore for backup {backup_id}")
         
         try:
-            # Find backup
-            backup_dir = self.backup_storage_path / backup_id
-            if not backup_dir.exists():
-                raise Exception(f"Backup {backup_id} not found")
+            # Find backup using storage manager or local storage
+            backup_dir = None
+            
+            if self.storage_manager:
+                # Try to retrieve from storage manager
+                temp_restore_dir = self.backup_storage_path / f"file-restore-{backup_id}"
+                temp_restore_dir.mkdir(exist_ok=True)
+                
+                success = await self.storage_manager.retrieve_backup(
+                    backup_id, str(temp_restore_dir)
+                )
+                
+                if success:
+                    backup_dir = temp_restore_dir
+                    logger.info(f"Retrieved backup from storage manager for file restore")
+                else:
+                    logger.warning("Failed to retrieve from storage manager, trying local")
+            
+            # Fallback to local storage
+            if not backup_dir:
+                local_backup_dir = self.backup_storage_path / backup_id
+                if local_backup_dir.exists():
+                    backup_dir = local_backup_dir
+                else:
+                    raise Exception(f"Backup {backup_id} not found in any storage")
             
             # Simulate file extraction and restore
             await asyncio.sleep(2)
@@ -264,8 +357,11 @@ class BackupEngine:
         logger.info(f"Starting V2V migration from {source_platform} to {target_platform}")
         
         try:
-            source_connector = self.connectors[source_platform]
-            target_connector = self.connectors[target_platform]
+            source_key = 'ubuntu' if source_platform.value == 'ubuntu' else source_platform
+            target_key = 'ubuntu' if target_platform.value == 'ubuntu' else target_platform
+            
+            source_connector = self.connectors[source_key]
+            target_connector = self.connectors[target_key]
             
             # Get source VM details
             vm_details = await source_connector.get_vm_details(source_vm_id)
