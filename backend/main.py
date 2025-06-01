@@ -1,4 +1,4 @@
-# Updated main.py with database persistence for platform connections
+# Updated main.py with automatic VM discovery and better persistence
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Import our modules
 from database import (
     get_db, init_db, Base, engine,
-    VirtualMachine, BackupJob, BackupRepository, PlatformConnection,
+    VirtualMachine, BackupJob, BackupRepository, PlatformConnection, BackupRecord,
     PlatformType, BackupJobStatus, BackupType,
     VMResponse, BackupJobCreate, BackupJobResponse,
     BackupRepositoryCreate, BackupRepositoryResponse,
@@ -168,6 +168,12 @@ class PlatformConnectionManager:
                         # Update last connected time
                         conn.last_connected = datetime.now()
                         logger.info(f"✅ Successfully restored {platform} connection")
+                        
+                        # Automatically discover and save VMs after successful connection
+                        try:
+                            await self._discover_and_save_vms(db, platform, connector)
+                        except Exception as vm_error:
+                            logger.warning(f"Failed to discover VMs for {platform}: {vm_error}")
                     else:
                         logger.warning(f"❌ Failed to restore {platform} connection")
                         # Mark as inactive but don't delete
@@ -183,6 +189,49 @@ class PlatformConnectionManager:
         except Exception as e:
             logger.error(f"Error restoring connections: {e}")
             return restored
+    
+    async def _discover_and_save_vms(self, db: Session, platform: str, connector):
+        """Discover VMs from platform and save to database"""
+        try:
+            logger.info(f"Discovering VMs from {platform}...")
+            vms = await connector.list_vms()
+            
+            for vm_data in vms:
+                existing_vm = db.query(VirtualMachine).filter(
+                    VirtualMachine.vm_id == vm_data['vm_id'],
+                    VirtualMachine.platform == PlatformType(platform)
+                ).first()
+                
+                if existing_vm:
+                    # Update existing VM
+                    existing_vm.name = vm_data['name']
+                    existing_vm.host = vm_data['host']
+                    existing_vm.cpu_count = vm_data['cpu_count']
+                    existing_vm.memory_mb = vm_data['memory_mb']
+                    existing_vm.disk_size_gb = vm_data['disk_size_gb']
+                    existing_vm.operating_system = vm_data['operating_system']
+                    existing_vm.power_state = vm_data['power_state']
+                    existing_vm.updated_at = datetime.now()
+                else:
+                    # Create new VM record
+                    new_vm = VirtualMachine(
+                        vm_id=vm_data['vm_id'],
+                        name=vm_data['name'],
+                        platform=PlatformType(platform),
+                        host=vm_data['host'],
+                        cpu_count=vm_data['cpu_count'],
+                        memory_mb=vm_data['memory_mb'],
+                        disk_size_gb=vm_data['disk_size_gb'],
+                        operating_system=vm_data['operating_system'],
+                        power_state=vm_data['power_state']
+                    )
+                    db.add(new_vm)
+            
+            db.commit()
+            logger.info(f"Successfully saved {len(vms)} VMs from {platform}")
+            
+        except Exception as e:
+            logger.error(f"Failed to discover/save VMs for {platform}: {e}")
     
     async def get_stored_connections(self, db: Session) -> List[Dict[str, Any]]:
         """Get all stored connections for display"""
@@ -275,8 +324,25 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     
-    # Initialize backup engine
-    backup_engine = BackupEngine(connectors)
+    # Initialize storage manager
+    storage_manager = StorageManager()
+    
+    # Initialize default local storage
+    default_local_config = {
+        'name': 'Default Local Storage',
+        'storage_type': 'local',
+        'path': '/app/backups',
+        'capacity_gb': 1000
+    }
+    default_backend = LocalStorageBackend(default_local_config)
+    storage_manager.register_backend('default_local', default_backend)
+    
+    # Connect storage backends
+    await storage_manager.connect_all()
+    app.state.storage_manager = storage_manager
+    
+    # Initialize backup engine with storage manager
+    backup_engine = BackupEngine(connectors, storage_manager)
     app.state.backup_engine = backup_engine
     
     logger.info("VM Backup Solution API started!")
@@ -325,7 +391,7 @@ async def health_check():
         "platform_connections": platform_status
     }
 
-# NEW: Get platform status endpoint
+# Get platform status endpoint
 @app.get("/api/v1/platforms/status")
 async def get_platform_status():
     """Get current platform connection status"""
@@ -333,21 +399,21 @@ async def get_platform_status():
         'vmware': False, 'proxmox': False, 'xcpng': False, 'ubuntu': False
     })
 
-# NEW: Get stored connections endpoint
+# Get stored connections endpoint
 @app.get("/api/v1/platforms/connections")
 async def get_stored_connections(db: Session = Depends(get_db)):
     """Get all stored platform connections"""
     connection_manager = app.state.connection_manager
     return await connection_manager.get_stored_connections(db)
 
-# UPDATED: Platform Management Endpoints with database persistence
+# UPDATED: Platform Management with automatic VM discovery
 @app.post("/api/v1/platforms/{platform_type}/connect")
 async def connect_platform(
     platform_type: PlatformType,
     connection_data: dict,
     db: Session = Depends(get_db)
 ):
-    """Connect to a virtualization platform and save to database"""
+    """Connect to a virtualization platform with automatic VM discovery"""
     try:
         logger.info(f"Attempting to connect to {platform_type} at {connection_data.get('host')}")
         
@@ -374,12 +440,58 @@ async def connect_platform(
             
             app.state.platform_status[platform_type.value] = True
             
+            # AUTOMATICALLY DISCOVER AND SAVE VMs
+            try:
+                logger.info(f"Discovering VMs from {platform_type}...")
+                vms = await connector.list_vms()
+                
+                vm_count = 0
+                for vm_data in vms:
+                    existing_vm = db.query(VirtualMachine).filter(
+                        VirtualMachine.vm_id == vm_data['vm_id'],
+                        VirtualMachine.platform == platform_type
+                    ).first()
+                    
+                    if existing_vm:
+                        # Update existing VM
+                        existing_vm.name = vm_data['name']
+                        existing_vm.host = vm_data['host']
+                        existing_vm.cpu_count = vm_data['cpu_count']
+                        existing_vm.memory_mb = vm_data['memory_mb']
+                        existing_vm.disk_size_gb = vm_data['disk_size_gb']
+                        existing_vm.operating_system = vm_data['operating_system']
+                        existing_vm.power_state = vm_data['power_state']
+                        existing_vm.updated_at = datetime.now()
+                    else:
+                        # Create new VM record
+                        new_vm = VirtualMachine(
+                            vm_id=vm_data['vm_id'],
+                            name=vm_data['name'],
+                            platform=platform_type,
+                            host=vm_data['host'],
+                            cpu_count=vm_data['cpu_count'],
+                            memory_mb=vm_data['memory_mb'],
+                            disk_size_gb=vm_data['disk_size_gb'],
+                            operating_system=vm_data['operating_system'],
+                            power_state=vm_data['power_state']
+                        )
+                        db.add(new_vm)
+                    vm_count += 1
+                
+                db.commit()
+                logger.info(f"Successfully discovered and saved {vm_count} VMs from {platform_type}")
+                
+            except Exception as vm_error:
+                logger.warning(f"VM discovery failed for {platform_type}: {vm_error}")
+                # Still return success for connection, but note VM discovery issue
+            
             logger.info(f"Successfully connected and saved {platform_type}")
             return {
                 "status": "connected", 
                 "platform": platform_type,
                 "message": f"Successfully connected to {platform_type.value.upper()}",
-                "connection_id": saved_connection.id
+                "connection_id": saved_connection.id,
+                "vms_discovered": vm_count if 'vm_count' in locals() else 0
             }
         else:
             error_msg = f"Failed to connect to {platform_type.value.upper()}: Connection test failed"
@@ -446,81 +558,6 @@ async def disconnect_platform(
     except Exception as e:
         logger.error(f"Failed to disconnect from {platform_type}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/platforms/{platform_type}/vms")
-async def get_platform_vms(
-    platform_type: PlatformType,
-    db: Session = Depends(get_db)
-) -> List[dict]:
-    """Get list of VMs from a platform with better error handling"""
-    try:
-        connectors = app.state.connectors
-        
-        if platform_type.value == 'ubuntu':
-            connector = connectors['ubuntu']
-        else:
-            connector = connectors[platform_type]
-        
-        if not connector.connected:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Not connected to {platform_type.value.upper()}. Please connect first."
-            )
-        
-        logger.info(f"Getting VMs from {platform_type}")
-        vms = await connector.list_vms()
-        
-        # Store/update VMs in database
-        for vm_data in vms:
-            existing_vm = db.query(VirtualMachine).filter(
-                VirtualMachine.vm_id == vm_data['vm_id'],
-                VirtualMachine.platform == platform_type
-            ).first()
-            
-            if existing_vm:
-                # Update existing VM
-                existing_vm.name = vm_data['name']
-                existing_vm.host = vm_data['host']
-                existing_vm.cpu_count = vm_data['cpu_count']
-                existing_vm.memory_mb = vm_data['memory_mb']
-                existing_vm.disk_size_gb = vm_data['disk_size_gb']
-                existing_vm.operating_system = vm_data['operating_system']
-                existing_vm.power_state = vm_data['power_state']
-                existing_vm.updated_at = datetime.now()
-            else:
-                # Create new VM record
-                new_vm = VirtualMachine(
-                    vm_id=vm_data['vm_id'],
-                    name=vm_data['name'],
-                    platform=platform_type,
-                    host=vm_data['host'],
-                    cpu_count=vm_data['cpu_count'],
-                    memory_mb=vm_data['memory_mb'],
-                    disk_size_gb=vm_data['disk_size_gb'],
-                    operating_system=vm_data['operating_system'],
-                    power_state=vm_data['power_state']
-                )
-                db.add(new_vm)
-        
-        db.commit()
-        
-        logger.info(f"Successfully retrieved {len(vms)} VMs from {platform_type}")
-        return vms
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"Failed to get VMs from {platform_type.value.upper()}: {str(e)}"
-        logger.error(error_msg)
-        
-        if "not connected" in str(e).lower():
-            error_msg = f"Not connected to {platform_type.value.upper()}. Please connect first."
-        elif "timeout" in str(e).lower():
-            error_msg = f"Timeout getting VMs from {platform_type.value.upper()}. The operation took too long."
-        elif "permission" in str(e).lower():
-            error_msg = f"Permission denied getting VMs from {platform_type.value.upper()}. Check user permissions."
-        
-        raise HTTPException(status_code=500, detail=error_msg)
 
 # NEW: Get all VMs from database
 @app.get("/api/v1/vms")
@@ -653,28 +690,83 @@ async def run_backup_job(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Manually trigger a backup job"""
+    """Manually trigger a backup job with proper status tracking"""
     try:
         job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="Backup job not found")
         
-        # Add backup task to background
-        backup_engine = app.state.backup_engine
-        background_tasks.add_task(backup_engine.run_backup, job)
-        
-        # Update job status
+        # Update job status to running
         job.status = BackupJobStatus.RUNNING
         job.last_run = datetime.now()
         db.commit()
         
+        # Create backup record
+        backup_record = BackupRecord(
+            backup_id=f"backup-{job_id}-{int(datetime.now().timestamp())}",
+            job_id=job_id,
+            vm_id=job.vm_id,
+            backup_type=job.backup_type,
+            status="running",
+            start_time=datetime.now()
+        )
+        db.add(backup_record)
+        db.commit()
+        
+        # Run backup in background with status updates
+        background_tasks.add_task(run_backup_with_status_updates, job, backup_record.id, db)
+        
         logger.info(f"Started backup job: {job.name}")
-        return {"message": "Backup job started", "job_id": job_id}
+        return {"message": "Backup job started", "job_id": job_id, "backup_record_id": backup_record.id}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error running backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+async def run_backup_with_status_updates(job: BackupJob, backup_record_id: int, db: Session):
+    """Run backup job and update status in database"""
+    try:
+        backup_engine = app.state.backup_engine
+        
+        # Run the actual backup
+        result = await backup_engine.run_backup(job)
+        
+        # Update job and record status based on result
+        db.refresh(job)
+        backup_record = db.query(BackupRecord).filter(BackupRecord.id == backup_record_id).first()
+        
+        if result["status"] == "success":
+            job.status = BackupJobStatus.COMPLETED
+            if backup_record:
+                backup_record.status = "completed"
+                backup_record.end_time = datetime.now()
+                backup_record.size_mb = result.get("size_mb", 0)
+                backup_record.file_path = result.get("path", "")
+        else:
+            job.status = BackupJobStatus.FAILED
+            if backup_record:
+                backup_record.status = "failed" 
+                backup_record.end_time = datetime.now()
+                backup_record.error_message = result.get("error", "Unknown error")
+        
+        db.commit()
+        logger.info(f"Backup job {job.id} completed with status: {result['status']}")
+        
+    except Exception as e:
+        logger.error(f"Backup job {job.id} failed with exception: {e}")
+        
+        # Update status to failed
+        db.refresh(job)
+        job.status = BackupJobStatus.FAILED
+        
+        backup_record = db.query(BackupRecord).filter(BackupRecord.id == backup_record_id).first()
+        if backup_record:
+            backup_record.status = "failed"
+            backup_record.end_time = datetime.now()
+            backup_record.error_message = str(e)
+        
+        db.commit()
 
 @app.delete("/api/v1/backup-jobs/{job_id}")
 async def delete_backup_job(
@@ -703,15 +795,398 @@ async def delete_backup_job(
         logger.error(f"Error deleting backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# UPDATED: Statistics with real data
+# Storage Management Endpoints
+@app.get("/api/v1/storage/backends")
+async def list_storage_backends():
+    """List all configured storage backends"""
+    try:
+        storage_manager = app.state.storage_manager
+        backends_info = []
+        
+        for backend_id, backend in storage_manager.backends.items():
+            test_result = await backend.test_connection()
+            backends_info.append({
+                "id": backend_id,
+                "name": backend.name,
+                "storage_type": backend.storage_type,
+                "capacity_gb": backend.capacity_gb,
+                "is_mounted": backend.is_mounted,
+                "mount_point": backend.mount_point,
+                "health": test_result,
+                "is_default": backend_id == storage_manager.default_backend
+            })
+        
+        return backends_info
+    except Exception as e:
+        logger.error(f"Error listing storage backends: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/storage/backends")
+async def create_storage_backend(
+    backend_config: dict,
+    db: Session = Depends(get_db)
+):
+    """Create and configure a new storage backend"""
+    try:
+        storage_manager = app.state.storage_manager
+        
+        # Validate configuration
+        required_fields = ['name', 'storage_type']
+        for field in required_fields:
+            if field not in backend_config:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+        
+        # Create backend
+        backend = storage_manager.create_backend_from_config(backend_config)
+        backend_id = f"{backend_config['storage_type']}_{backend_config['name'].replace(' ', '_').lower()}"
+        
+        # Test connection
+        test_result = await backend.test_connection()
+        if test_result["status"] == "error":
+            raise HTTPException(status_code=400, detail=f"Storage backend test failed: {test_result['message']}")
+        
+        # Connect to backend
+        connected = await backend.connect()
+        if not connected:
+            raise HTTPException(status_code=400, detail="Failed to connect to storage backend")
+        
+        # Register backend
+        storage_manager.register_backend(backend_id, backend)
+        
+        # Save to database
+        db_backend = BackupRepository(
+            name=backend_config['name'],
+            storage_type=backend_config['storage_type'],
+            connection_string=json.dumps(backend_config),
+            capacity_gb=backend_config.get('capacity_gb', 0),
+            encryption_enabled=True,
+            settings=backend_config
+        )
+        db.add(db_backend)
+        db.commit()
+        db.refresh(db_backend)
+        
+        logger.info(f"Created storage backend: {backend_id}")
+        return {
+            "id": backend_id,
+            "name": backend.name,
+            "storage_type": backend.storage_type,
+            "status": "connected",
+            "database_id": db_backend.id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating storage backend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/v1/storage/backends/{backend_id}")
+async def delete_storage_backend(
+    backend_id: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a storage backend"""
+    try:
+        storage_manager = app.state.storage_manager
+        
+        backend = storage_manager.get_backend(backend_id)
+        if not backend:
+            raise HTTPException(status_code=404, detail="Storage backend not found")
+        
+        # Disconnect backend
+        await backend.disconnect()
+        
+        # Remove from storage manager
+        del storage_manager.backends[backend_id]
+        
+        # Remove from database
+        db_backend = db.query(BackupRepository).filter(
+            BackupRepository.name == backend.name
+        ).first()
+        if db_backend:
+            db.delete(db_backend)
+            db.commit()
+        
+        logger.info(f"Deleted storage backend: {backend_id}")
+        return {"message": "Storage backend deleted"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting storage backend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/storage/backends/{backend_id}/test")
+async def test_storage_backend(backend_id: str):
+    """Test storage backend connection"""
+    try:
+        storage_manager = app.state.storage_manager
+        backend = storage_manager.get_backend(backend_id)
+        
+        if not backend:
+            raise HTTPException(status_code=404, detail="Storage backend not found")
+        
+        test_result = await backend.test_connection()
+        return test_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing storage backend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/storage/backups")
+async def list_all_backups():
+    """List all backups across all storage backends"""
+    try:
+        storage_manager = app.state.storage_manager
+        all_backups = await storage_manager.list_all_backups()
+        
+        # Flatten the results
+        flattened_backups = []
+        for backend_id, backups in all_backups.items():
+            for backup in backups:
+                backup['storage_backend_id'] = backend_id
+                flattened_backups.append(backup)
+        
+        # Sort by creation date
+        flattened_backups.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        return flattened_backups
+        
+    except Exception as e:
+        logger.error(f"Error listing all backups: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# VM Restore Endpoints
+@app.post("/api/v1/restore/instant")
+async def instant_restore_vm(
+    restore_request: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Perform instant VM restore"""
+    try:
+        backup_id = restore_request.get('backup_id')
+        target_platform = restore_request.get('target_platform')
+        restore_config = restore_request.get('restore_config', {})
+        
+        if not backup_id or not target_platform:
+            raise HTTPException(status_code=400, detail="backup_id and target_platform are required")
+        
+        backup_engine = app.state.backup_engine
+        
+        # Create restore record
+        restore_record = BackupRecord(
+            backup_id=f"restore-{backup_id}-{int(datetime.now().timestamp())}",
+            job_id=0,  # Special ID for restore operations
+            vm_id=restore_request.get('vm_id', 'unknown'),
+            backup_type=BackupType.FULL,
+            status="running",
+            start_time=datetime.now(),
+            record_metadata={"operation": "restore", "source_backup": backup_id}
+        )
+        db.add(restore_record)
+        db.commit()
+        db.refresh(restore_record)
+        
+        # Start restore in background
+        background_tasks.add_task(
+            perform_instant_restore, 
+            backup_id, 
+            PlatformType(target_platform), 
+            restore_config,
+            restore_record.id,
+            db
+        )
+        
+        logger.info(f"Started instant restore for backup {backup_id}")
+        return {
+            "message": "Instant restore started",
+            "restore_record_id": restore_record.id,
+            "backup_id": backup_id,
+            "target_platform": target_platform
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting instant restore: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def perform_instant_restore(backup_id: str, target_platform: PlatformType, 
+                                restore_config: dict, restore_record_id: int, db: Session):
+    """Perform the actual instant restore operation"""
+    try:
+        backup_engine = app.state.backup_engine
+        
+        # Perform the restore
+        result = await backup_engine.instant_restore(backup_id, target_platform, restore_config)
+        
+        # Update restore record
+        restore_record = db.query(BackupRecord).filter(BackupRecord.id == restore_record_id).first()
+        if restore_record:
+            restore_record.status = "completed"
+            restore_record.end_time = datetime.now()
+            restore_record.record_metadata = {
+                "operation": "restore",
+                "source_backup": backup_id,
+                "new_vm_id": result.get("new_vm_id"),
+                "restore_time": result.get("restore_time")
+            }
+        
+        db.commit()
+        logger.info(f"Instant restore completed: {result}")
+        
+    except Exception as e:
+        logger.error(f"Instant restore failed: {e}")
+        
+        # Update restore record with error
+        restore_record = db.query(BackupRecord).filter(BackupRecord.id == restore_record_id).first()
+        if restore_record:
+            restore_record.status = "failed"
+            restore_record.end_time = datetime.now()
+            restore_record.error_message = str(e)
+        
+        db.commit()
+
+@app.post("/api/v1/restore/files")
+async def file_level_restore(
+    restore_request: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Perform file-level restore"""
+    try:
+        backup_id = restore_request.get('backup_id')
+        file_paths = restore_request.get('file_paths', [])
+        target_path = restore_request.get('target_path')
+        
+        if not backup_id or not file_paths or not target_path:
+            raise HTTPException(status_code=400, detail="backup_id, file_paths, and target_path are required")
+        
+        backup_engine = app.state.backup_engine
+        
+        # Create restore record
+        restore_record = BackupRecord(
+            backup_id=f"file-restore-{backup_id}-{int(datetime.now().timestamp())}",
+            job_id=0,
+            vm_id=restore_request.get('vm_id', 'unknown'),
+            backup_type=BackupType.INCREMENTAL,
+            status="running",
+            start_time=datetime.now(),
+            record_metadata={
+                "operation": "file_restore", 
+                "source_backup": backup_id,
+                "file_paths": file_paths,
+                "target_path": target_path
+            }
+        )
+        db.add(restore_record)
+        db.commit()
+        db.refresh(restore_record)
+        
+        # Start file restore in background
+        background_tasks.add_task(
+            perform_file_restore, 
+            backup_id, 
+            file_paths, 
+            target_path,
+            restore_record.id,
+            db
+        )
+        
+        logger.info(f"Started file-level restore for backup {backup_id}")
+        return {
+            "message": "File-level restore started",
+            "restore_record_id": restore_record.id,
+            "files_count": len(file_paths)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting file restore: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def perform_file_restore(backup_id: str, file_paths: List[str], target_path: str, 
+                             restore_record_id: int, db: Session):
+    """Perform the actual file-level restore operation"""
+    try:
+        backup_engine = app.state.backup_engine
+        
+        # Perform the file restore
+        result = await backup_engine.file_restore(backup_id, file_paths, target_path)
+        
+        # Update restore record
+        restore_record = db.query(BackupRecord).filter(BackupRecord.id == restore_record_id).first()
+        if restore_record:
+            restore_record.status = "completed"
+            restore_record.end_time = datetime.now()
+            restore_record.record_metadata.update({
+                "files_restored": result.get("files_restored", 0)
+            })
+        
+        db.commit()
+        logger.info(f"File restore completed: {result}")
+        
+    except Exception as e:
+        logger.error(f"File restore failed: {e}")
+        
+        # Update restore record with error
+        restore_record = db.query(BackupRecord).filter(BackupRecord.id == restore_record_id).first()
+        if restore_record:
+            restore_record.status = "failed"
+            restore_record.end_time = datetime.now()
+            restore_record.error_message = str(e)
+        
+        db.commit()
+
+@app.get("/api/v1/restore/history")
+async def get_restore_history(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """Get restore operation history"""
+    try:
+        restore_records = db.query(BackupRecord).filter(
+            BackupRecord.job_id == 0  # Restore operations have job_id = 0
+        ).order_by(BackupRecord.start_time.desc()).offset(skip).limit(limit).all()
+        
+        results = []
+        for record in restore_records:
+            results.append({
+                "id": record.id,
+                "backup_id": record.backup_id,
+                "vm_id": record.vm_id,
+                "status": record.status,
+                "start_time": record.start_time.isoformat() if record.start_time else None,
+                "end_time": record.end_time.isoformat() if record.end_time else None,
+                "error_message": record.error_message,
+                "metadata": record.record_metadata or {}
+            })
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error getting restore history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/api/v1/statistics")
 async def get_statistics(db: Session = Depends(get_db)):
     """Get backup system statistics from database"""
     try:
+        # Get VM counts
         total_vms = db.query(VirtualMachine).count()
+        
+        # Get backup job counts
         total_jobs = db.query(BackupJob).count()
         running_jobs = db.query(BackupJob).filter(
             BackupJob.status == BackupJobStatus.RUNNING
+        ).count()
+        completed_jobs = db.query(BackupJob).filter(
+            BackupJob.status == BackupJobStatus.COMPLETED
         ).count()
         
         # Calculate recent jobs (last 24 hours)
@@ -720,11 +1195,7 @@ async def get_statistics(db: Session = Depends(get_db)):
             BackupJob.last_run >= yesterday
         ).count()
         
-        # Calculate success rate (simplified)
-        completed_jobs = db.query(BackupJob).filter(
-            BackupJob.status == BackupJobStatus.COMPLETED
-        ).count()
-        
+        # Calculate success rate
         if total_jobs > 0:
             success_rate = f"{(completed_jobs / total_jobs) * 100:.1f}%"
         else:
@@ -734,12 +1205,17 @@ async def get_statistics(db: Session = Depends(get_db)):
         platform_status = getattr(app.state, 'platform_status', {})
         connected_platforms = sum(platform_status.values())
         
+        # Calculate storage used from backup records
+        backup_records = db.query(BackupRecord).all()
+        total_storage_mb = sum(record.size_mb or 0 for record in backup_records)
+        total_storage_gb = total_storage_mb / 1024 if total_storage_mb > 0 else 0
+        
         return {
             "total_backup_jobs": total_jobs,
             "running_jobs": running_jobs,
             "total_vms_protected": total_vms,
             "connected_platforms": connected_platforms,
-            "total_backups_size": "0 GB",  # TODO: Calculate from actual backups
+            "total_backups_size": f"{total_storage_gb:.1f} GB",
             "last_24h_jobs": recent_jobs,
             "success_rate": success_rate
         }
