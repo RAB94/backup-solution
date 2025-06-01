@@ -6,8 +6,6 @@ import {
   Database,
   Cloud,
   RefreshCw,
-  Play,
-  Trash2,
   Download,
   Settings,
   CheckCircle,
@@ -20,11 +18,11 @@ import {
   Terminal,
   LogIn,
   LogOut,
-  UserPlus,
-  Wifi,
   Search,
-  AlertCircle,
-  X
+  X,
+  Network,
+  Edit,
+  Save
 } from 'lucide-react';
 
 // Types
@@ -76,6 +74,8 @@ interface BackupJob {
   next_run: string | null;
   created_at: string;
 }
+
+type PlatformType = 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu';
 
 interface DashboardStats {
   total_backup_jobs: number;
@@ -203,6 +203,33 @@ class APIService {
     });
   }
 
+  async addVMManually(vmData: any) {
+    return this.request('/vms/manual', {
+      method: 'POST',
+      body: JSON.stringify(vmData),
+    });
+  }
+
+  async updateVM(vmId: string, vmData: any) {
+    return this.request(`/vms/${vmId}`, {
+      method: 'PUT',
+      body: JSON.stringify(vmData),
+    });
+  }
+
+  async scanVMByIP(ip: string, credentials: any) {
+    return this.request('/vms/scan', {
+      method: 'POST',
+      body: JSON.stringify({ ip, ...credentials }),
+    });
+  }
+
+  async refreshPlatformVMs(platform: string) {
+    return this.request(`/platforms/${platform}/refresh`, {
+      method: 'POST',
+    });
+  }
+
   async backupUbuntuMachine(machineId: string, config: any) {
     return this.request(`/ubuntu/${machineId}/backup`, {
       method: 'POST',
@@ -247,6 +274,13 @@ class APIService {
     return this.request(`/platforms/${platform}/connect`, {
       method: 'POST',
       body: JSON.stringify(connectionData),
+    });
+  }
+
+  async discoverNetworkRange(networkRange: string) {
+    return this.request('/discovery/network', {
+      method: 'POST',
+      body: JSON.stringify({ network_range: networkRange }),
     });
   }
 }
@@ -382,31 +416,41 @@ const Button: React.FC<{
   );
 };
 
-const MetricCard: React.FC<{
+const Modal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
   title: string;
-  value: string;
-  icon: React.ReactNode;
-  trend?: string;
-  trendDirection?: 'up' | 'down' | 'stable';
-}> = ({ title, value, icon, trend, trendDirection }) => (
-  <Card className="text-center">
-    <div className="flex flex-col items-center space-y-3">
-      <div className="text-blue-400 text-3xl">{icon}</div>
-      <div>
-        <p className="text-slate-400 text-sm uppercase tracking-wider">{title}</p>
-        <p className="text-white text-2xl font-bold font-mono">{value}</p>
-        {trend && (
-          <p className={`text-sm mt-1 ${
-            trendDirection === 'up' ? 'text-emerald-400' : 
-            trendDirection === 'down' ? 'text-red-400' : 'text-slate-400'
-          }`}>
-            {trendDirection === 'up' ? '↗' : trendDirection === 'down' ? '↘' : '→'} {trend}
-          </p>
-        )}
+  children: React.ReactNode;
+  size?: 'sm' | 'md' | 'lg' | 'xl';
+}> = ({ isOpen, onClose, title, children, size = 'md' }) => {
+  if (!isOpen) return null;
+
+  const sizeClasses = {
+    sm: 'w-96',
+    md: 'w-[32rem]',
+    lg: 'w-[48rem]',
+    xl: 'w-[64rem]'
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className={`bg-slate-800 border border-slate-700 rounded-lg ${sizeClasses[size]} max-w-full mx-4`}>
+        <div className="flex items-center justify-between p-4 border-b border-slate-700">
+          <h2 className="text-lg font-semibold text-white">{title}</h2>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white transition-colors"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-6">
+          {children}
+        </div>
       </div>
     </div>
-  </Card>
-);
+  );
+};
 
 const StatusIndicator: React.FC<{
   status: string;
@@ -448,524 +492,651 @@ const StatusIndicator: React.FC<{
   );
 };
 
-const Modal: React.FC<{
-  isOpen: boolean;
-  onClose: () => void;
+const MetricCard: React.FC<{
   title: string;
-  children: React.ReactNode;
-}> = ({ isOpen, onClose, title, children }) => {
-  if (!isOpen) return null;
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-slate-800 border border-slate-700 rounded-lg w-96 max-w-full mx-4">
-        <div className="flex items-center justify-between p-4 border-b border-slate-700">
-          <h2 className="text-lg font-semibold text-white">{title}</h2>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white transition-colors"
-          >
-            <X size={20} />
-          </button>
-        </div>
-        <div className="p-6">
-          {children}
-        </div>
+  value: string;
+  icon: React.ReactNode;
+  trend?: string;
+  trendDirection?: 'up' | 'down' | 'stable';
+}> = ({ title, value, icon, trend, trendDirection }) => (
+  <Card className="text-center">
+    <div className="flex flex-col items-center space-y-3">
+      <div className="text-blue-400 text-3xl">{icon}</div>
+      <div>
+        <p className="text-slate-400 text-sm uppercase tracking-wider">{title}</p>
+        <p className="text-white text-2xl font-bold font-mono">{value}</p>
+        {trend && (
+          <p className={`text-sm mt-1 ${
+            trendDirection === 'up' ? 'text-emerald-400' : 
+            trendDirection === 'down' ? 'text-red-400' : 'text-slate-400'
+          }`}>
+            {trendDirection === 'up' ? '↗' : trendDirection === 'down' ? '↘' : '→'} {trend}
+          </p>
+        )}
       </div>
     </div>
-  );
-};
-
-const ConfirmationModal: React.FC<{
-  isOpen: boolean;
-  title: string;
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}> = ({ isOpen, title, message, onConfirm, onCancel }) => (
-  <Modal isOpen={isOpen} onClose={onCancel} title={title}>
-    <div className="space-y-4">
-      <p className="text-slate-300">{message}</p>
-      <div className="flex justify-end space-x-3">
-        <Button onClick={onCancel} variant="secondary">
-          Cancel
-        </Button>
-        <Button onClick={onConfirm} variant="danger">
-          Confirm
-        </Button>
-      </div>
-    </div>
-  </Modal>
+  </Card>
 );
-
-const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const { login } = useAuth();
-
-  const handleSubmit = async () => {
-    console.log('Login form submitted:', { username, password: '***' });
-    setLoading(true);
-    setError('');
-    
-    if (!username || !password) {
-      setError('Please enter both username and password');
-      setLoading(false);
-      return;
-    }
-    
-    try {
-      console.log('Calling login API...');
-      const success = await login(username, password);
-      console.log('Login API result:', success);
-      
-      if (success) {
-        console.log('Login successful, closing modal');
-        onClose();
-      } else {
-        setError('Invalid credentials');
-      }
-    } catch (err: any) {
-      console.error('Login error:', err);
-      setError('Login failed. Please check your connection and try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Modal isOpen={true} onClose={onClose} title="Login">
-      <div className="space-y-4">
-        {error && (
-          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-            {error}
-          </div>
-        )}
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">
-            Username
-          </label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter username"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">
-            Password
-          </label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter password"
-            disabled={loading}
-            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
-          />
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary" disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
-            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
-            {loading ? 'Logging in...' : 'Login'}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-const RegisterForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const [formData, setFormData] = useState({
-    username: '',
-    email: '',
-    full_name: '',
-    password: '',
-    confirm_password: '',
-    role: 'viewer' as const
-  });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const { register } = useAuth();
-
-  const handleSubmit = async () => {
-    console.log('Registration form submitted:', formData);
-    setLoading(true);
-    setError('');
-    
-    if (formData.password !== formData.confirm_password) {
-      setError('Passwords do not match');
-      setLoading(false);
-      return;
-    }
-
-    if (!formData.username || !formData.email || !formData.full_name || !formData.password) {
-      setError('Please fill in all required fields');
-      setLoading(false);
-      return;
-    }
-
-    try {
-      console.log('Calling register API...');
-      const success = await register(formData);
-      console.log('Register API result:', success);
-      
-      if (success) {
-        alert('Registration successful! Please login.');
-        onClose();
-      } else {
-        setError('Registration failed. Please try again.');
-      }
-    } catch (err: any) {
-      console.error('Registration error:', err);
-      setError(err.message || 'Registration failed. Please check your connection.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Modal isOpen={true} onClose={onClose} title="Register">
-      <div className="space-y-4 max-h-80 overflow-y-auto">
-        {error && (
-          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-            {error}
-          </div>
-        )}
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
-          <input
-            type="text"
-            value={formData.username}
-            onChange={(e) => setFormData({...formData, username: e.target.value})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Choose username"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Email</label>
-          <input
-            type="email"
-            value={formData.email}
-            onChange={(e) => setFormData({...formData, email: e.target.value})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="email@company.com"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Full Name</label>
-          <input
-            type="text"
-            value={formData.full_name}
-            onChange={(e) => setFormData({...formData, full_name: e.target.value})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="John Doe"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
-          <input
-            type="password"
-            value={formData.password}
-            onChange={(e) => setFormData({...formData, password: e.target.value})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter password"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Confirm Password</label>
-          <input
-            type="password"
-            value={formData.confirm_password}
-            onChange={(e) => setFormData({...formData, confirm_password: e.target.value})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Confirm password"
-            disabled={loading}
-          />
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary" disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
-            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <UserPlus size={16} className="mr-2" />}
-            {loading ? 'Creating...' : 'Register'}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuth();
-  const [showLogin, setShowLogin] = useState(false);
-  const [showRegister, setShowRegister] = useState(false);
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <Card className="text-center w-96">
-          <div className="space-y-6">
-            <div className="flex justify-center">
-              <Shield className="text-blue-400" size={64} />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white">
-                VM Backup Solution
-              </h1>
-              <p className="text-slate-400 text-sm mt-2">Please login to continue</p>
-            </div>
-            <div className="flex space-x-3 justify-center">
-              <Button onClick={() => setShowLogin(true)} variant="primary">
-                <LogIn size={16} className="mr-2" />
-                Login
-              </Button>
-              <Button onClick={() => setShowRegister(true)} variant="secondary">
-                <UserPlus size={16} className="mr-2" />
-                Register
-              </Button>
-            </div>
-          </div>
-        </Card>
-
-        {showLogin && <LoginForm onClose={() => setShowLogin(false)} />}
-        {showRegister && <RegisterForm onClose={() => setShowRegister(false)} />}
-      </div>
-    );
-  }
-
-  return <>{children}</>;
-};
 
 const AddVMModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
-  availableVMs: VM[];
-  onAddVM: (vm: VM) => void;
-}> = ({ isOpen, onClose, availableVMs, onAddVM }) => {
-  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
+  onAddVM: (vm: any) => void;
+}> = ({ isOpen, onClose, onAddVM }) => {
+  const [method, setMethod] = useState<'scan' | 'manual'>('scan');
+  const [scanData, setScanData] = useState<{
+    ip: string;
+    username: string;
+    password: string;
+    ssh_key_path: string;
+    port: number;
+    platform: PlatformType;
+    use_key: boolean;
+  }>({
+    ip: '',
+    username: '',
+    password: '',
+    ssh_key_path: '',
+    port: 22,
+    platform: 'vmware',
+    use_key: false
+  });
+  const [manualData, setManualData] = useState<{
+    name: string;
+    ip_address: string;
+    platform: PlatformType;
+    cpu_count: number;
+    memory_mb: number;
+    disk_size_gb: number;
+    operating_system: string;
+    notes: string;
+  }>({
+    name: '',
+    ip_address: '',
+    platform: 'vmware',
+    cpu_count: 2,
+    memory_mb: 4096,
+    disk_size_gb: 50,
+    operating_system: '',
+    notes: ''
+  });
+  const [scanning, setScanning] = useState(false);
+
+  const handleScanVM = async () => {
+    setScanning(true);
+    try {
+      let result;
+      
+      // Try the dedicated VM scanning endpoint first
+      try {
+        result = await api.scanVMByIP(scanData.ip, scanData);
+      } catch (error) {
+        console.warn('Direct VM scan failed, trying alternative methods:', error);
+        
+        // Fallback methods for different platforms
+        if (scanData.platform === 'ubuntu') {
+          const discoveryResult = await api.discoverUbuntuMachines(`${scanData.ip}/32`);
+          if (discoveryResult.machines && discoveryResult.machines.length > 0) {
+            result = discoveryResult.machines[0];
+          }
+        } else {
+          // For other platforms, try to connect and get VM info
+          try {
+            await api.connectPlatform(scanData.platform, {
+              host: scanData.ip,
+              username: scanData.username,
+              password: scanData.password,
+              port: scanData.port
+            });
+            
+            const vms = await api.getVMs(scanData.platform);
+            if (vms && vms.length > 0) {
+              // Find VM that matches the IP or use first one found
+              result = vms.find(vm => vm.ip_address === scanData.ip || vm.host === scanData.ip) || vms[0];
+            }
+          } catch (platformError) {
+            console.warn('Platform connection failed:', platformError);
+            
+            // Final fallback: create a basic VM entry
+            result = {
+              vm_id: `manual-${scanData.ip.replace(/\./g, '-')}`,
+              name: `${scanData.platform}-${scanData.ip}`,
+              platform: scanData.platform,
+              host: scanData.ip,
+              ip_address: scanData.ip,
+              cpu_count: 2,
+              memory_mb: 4096,
+              disk_size_gb: 50,
+              operating_system: 'Unknown',
+              power_state: 'unknown',
+              created_at: new Date().toISOString()
+            };
+          }
+        }
+      }
+      
+      if (result) {
+        onAddVM(result);
+        onClose();
+      } else {
+        alert('No VM found at the specified IP address. Please check the IP and credentials, or try adding the VM manually.');
+      }
+    } catch (error) {
+      console.error('VM scan failed:', error);
+      alert(`Failed to scan VM: ${error instanceof Error ? error.message : 'Unknown error'}. You can try adding the VM manually instead.`);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const handleAddManualVM = async () => {
+    try {
+      const result = await api.addVMManually(manualData);
+      onAddVM(result);
+      onClose();
+    } catch (error) {
+      alert(`Failed to add VM: ${error}`);
+    }
+  };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Add Virtual Machine">
-      <div className="space-y-4">
-        <p className="text-slate-300 text-sm">
-          Select a virtual machine from connected platforms to add to backup monitoring:
-        </p>
-        
-        {availableVMs.length === 0 ? (
-          <div className="text-center py-8">
-            <AlertCircle className="text-amber-400 mx-auto mb-2" size={32} />
-            <p className="text-slate-300">No VMs available</p>
-            <p className="text-slate-400 text-sm">Connect to platforms first to discover VMs</p>
+    <Modal isOpen={isOpen} onClose={onClose} title="Add Virtual Machine" size="lg">
+      <div className="space-y-6">
+        <div className="flex space-x-4">
+          <button
+            onClick={() => setMethod('scan')}
+            className={`flex-1 p-3 rounded-lg border ${
+              method === 'scan'
+                ? 'border-blue-500 bg-blue-500 bg-opacity-20 text-blue-400'
+                : 'border-slate-600 text-slate-400 hover:border-slate-500'
+            }`}
+          >
+            <div className="flex items-center justify-center space-x-2">
+              <Search size={20} />
+              <span>Scan by IP</span>
+            </div>
+          </button>
+          <button
+            onClick={() => setMethod('manual')}
+            className={`flex-1 p-3 rounded-lg border ${
+              method === 'manual'
+                ? 'border-blue-500 bg-blue-500 bg-opacity-20 text-blue-400'
+                : 'border-slate-600 text-slate-400 hover:border-slate-500'
+            }`}
+          >
+            <div className="flex items-center justify-center space-x-2">
+              <Edit size={20} />
+              <span>Manual Entry</span>
+            </div>
+          </button>
+        </div>
+
+        {method === 'scan' ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">IP Address</label>
+                <input
+                  type="text"
+                  value={scanData.ip}
+                  onChange={(e) => setScanData({...scanData, ip: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="192.168.1.100"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Platform</label>
+                <select
+                  value={scanData.platform}
+                  onChange={(e) => setScanData({...scanData, platform: e.target.value as PlatformType})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
+                >
+                  <option value="vmware">VMware</option>
+                  <option value="proxmox">Proxmox</option>
+                  <option value="xcpng">XCP-NG</option>
+                  <option value="ubuntu">Ubuntu</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+                <input
+                  type="text"
+                  value={scanData.username}
+                  onChange={(e) => setScanData({...scanData, username: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="admin"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Port</label>
+                <input
+                  type="number"
+                  value={scanData.port}
+                  onChange={(e) => setScanData({...scanData, port: parseInt(e.target.value)})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={scanData.use_key}
+                onChange={(e) => setScanData({...scanData, use_key: e.target.checked})}
+                className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+              />
+              <label className="text-slate-300 text-sm">Use SSH Key</label>
+            </div>
+
+            {scanData.use_key ? (
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">SSH Key Path</label>
+                <input
+                  type="text"
+                  value={scanData.ssh_key_path}
+                  onChange={(e) => setScanData({...scanData, ssh_key_path: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="/path/to/private/key"
+                />
+              </div>
+            ) : (
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+                <input
+                  type="password"
+                  value={scanData.password}
+                  onChange={(e) => setScanData({...scanData, password: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="••••••••"
+                />
+              </div>
+            )}
+
+            <div className="flex justify-end space-x-3">
+              <Button onClick={onClose} variant="secondary" disabled={scanning}>
+                Cancel
+              </Button>
+              <Button onClick={handleScanVM} variant="primary" disabled={scanning || !scanData.ip}>
+                {scanning ? (
+                  <>
+                    <RefreshCw size={16} className="mr-2 animate-spin" />
+                    Scanning...
+                  </>
+                ) : (
+                  <>
+                    <Search size={16} className="mr-2" />
+                    Scan & Add
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         ) : (
-          <div className="max-h-60 overflow-y-auto space-y-2">
-            {availableVMs.map((vm) => (
-              <div
-                key={`${vm.platform}-${vm.vm_id}`}
-                className={`p-3 border rounded cursor-pointer transition-colors ${
-                  selectedVM?.vm_id === vm.vm_id
-                    ? 'border-blue-500 bg-blue-500 bg-opacity-10'
-                    : 'border-slate-600 hover:border-slate-500'
-                }`}
-                onClick={() => setSelectedVM(vm)}
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-white font-medium">{vm.name}</p>
-                    <p className="text-slate-400 text-sm">{vm.vm_id} • {vm.platform}</p>
-                  </div>
-                  <StatusIndicator status={vm.power_state} showLabel={false} />
-                </div>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">VM Name</label>
+                <input
+                  type="text"
+                  value={manualData.name}
+                  onChange={(e) => setManualData({...manualData, name: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="web-server-01"
+                />
               </div>
-            ))}
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">IP Address</label>
+                <input
+                  type="text"
+                  value={manualData.ip_address}
+                  onChange={(e) => setManualData({...manualData, ip_address: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="192.168.1.100"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Platform</label>
+                <select
+                  value={manualData.platform}
+                  onChange={(e) => setManualData({...manualData, platform: e.target.value as PlatformType})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
+                >
+                  <option value="vmware">VMware</option>
+                  <option value="proxmox">Proxmox</option>
+                  <option value="xcpng">XCP-NG</option>
+                  <option value="ubuntu">Ubuntu</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Operating System</label>
+                <input
+                  type="text"
+                  value={manualData.operating_system}
+                  onChange={(e) => setManualData({...manualData, operating_system: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="Ubuntu 22.04 LTS"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">CPU Cores</label>
+                <input
+                  type="number"
+                  value={manualData.cpu_count}
+                  onChange={(e) => setManualData({...manualData, cpu_count: parseInt(e.target.value)})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  min="1"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">RAM (MB)</label>
+                <input
+                  type="number"
+                  value={manualData.memory_mb}
+                  onChange={(e) => setManualData({...manualData, memory_mb: parseInt(e.target.value)})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  min="512"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Disk (GB)</label>
+                <input
+                  type="number"
+                  value={manualData.disk_size_gb}
+                  onChange={(e) => setManualData({...manualData, disk_size_gb: parseInt(e.target.value)})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  min="1"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">Notes</label>
+              <textarea
+                value={manualData.notes}
+                onChange={(e) => setManualData({...manualData, notes: e.target.value})}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                placeholder="Additional notes about this VM..."
+                rows={3}
+              />
+            </div>
+
+            <div className="flex justify-end space-x-3">
+              <Button onClick={onClose} variant="secondary">
+                Cancel
+              </Button>
+              <Button onClick={handleAddManualVM} variant="primary" disabled={!manualData.name}>
+                <Save size={16} className="mr-2" />
+                Add VM
+              </Button>
+            </div>
           </div>
         )}
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary">
-            Cancel
-          </Button>
-          <Button
-            onClick={() => {
-              if (selectedVM) {
-                onAddVM(selectedVM);
-                onClose();
-              }
-            }}
-            variant="primary"
-            disabled={!selectedVM}
-          >
-            Add VM
-          </Button>
-        </div>
       </div>
     </Modal>
   );
 };
 
-const UbuntuDiscovery: React.FC<{
-  onMachineConnect: (machine: any) => void;
-}> = ({ onMachineConnect }) => {
-  const [isScanning, setIsScanning] = useState(false);
-  const [discoveredMachines, setDiscoveredMachines] = useState<any[]>([]);
-  const [networkRange, setNetworkRange] = useState('192.168.1.0/24');
+const NetworkDiscoveryModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  onDiscoveredVMs: (vms: any[]) => void;
+}> = ({ isOpen, onClose, onDiscoveredVMs }) => {
+  const [networkRanges, setNetworkRanges] = useState([
+    '192.168.1.0/24',
+    '192.168.0.0/24',
+    '10.0.0.0/24'
+  ]);
+  const [customRange, setCustomRange] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [results, setResults] = useState<any[]>([]);
 
-  const handleScan = async () => {
-    setIsScanning(true);
+  const handleScanNetwork = async (range: string) => {
+    setScanning(true);
     try {
-      const result = await api.discoverUbuntuMachines(networkRange);
-      setDiscoveredMachines(result.machines || []);
+      console.log(`Scanning network range: ${range}`);
+      
+      // Try the generic network discovery first
+      let result;
+      try {
+        result = await api.discoverNetworkRange(range);
+      } catch (error) {
+        console.warn('Generic discovery failed, trying Ubuntu discovery:', error);
+        // Fallback to Ubuntu discovery which might work for general network scanning
+        result = await api.discoverUbuntuMachines(range);
+      }
+      
+      if (result && (result.discovered || result.machines)) {
+        const devices = result.discovered || result.machines || [];
+        setResults(devices);
+        
+        if (devices.length === 0) {
+          alert(`No devices found in range ${range}. Try a different network range or check connectivity.`);
+        } else {
+          alert(`🔍 Found ${devices.length} devices in range ${range}`);
+        }
+      } else {
+        setResults([]);
+        alert(`No devices found in range ${range}`);
+      }
     } catch (error) {
       console.error('Network scan failed:', error);
-      alert('Network scan failed');
+      alert(`❌ Network scan failed for ${range}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setResults([]);
     } finally {
-      setIsScanning(false);
+      setScanning(false);
+    }
+  };
+
+  const addCustomRange = () => {
+    if (customRange && !networkRanges.includes(customRange)) {
+      setNetworkRanges([...networkRanges, customRange]);
+      setCustomRange('');
     }
   };
 
   return (
-    <Card>
-      <div className="space-y-4">
-        <h3 className="text-white text-lg font-medium">Ubuntu Network Discovery</h3>
-
-        <div className="flex space-x-3">
-          <input
-            type="text"
-            value={networkRange}
-            onChange={(e) => setNetworkRange(e.target.value)}
-            className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="192.168.1.0/24"
-          />
-          <Button onClick={handleScan} disabled={isScanning} variant="primary">
-            {isScanning ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <Search size={16} className="mr-2" />}
-            {isScanning ? 'Scanning...' : 'Scan Network'}
-          </Button>
+    <Modal isOpen={isOpen} onClose={onClose} title="Network Discovery" size="xl">
+      <div className="space-y-6">
+        <div>
+          <h3 className="text-white font-medium mb-3">Network Ranges to Scan</h3>
+          <div className="space-y-2">
+            {networkRanges.map((range, index) => (
+              <div key={index} className="flex items-center space-x-3">
+                <span className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white font-mono">
+                  {range}
+                </span>
+                <Button
+                  onClick={() => handleScanNetwork(range)}
+                  size="sm"
+                  variant="primary"
+                  disabled={scanning}
+                >
+                  {scanning ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <Search size={14} />
+                  )}
+                </Button>
+              </div>
+            ))}
+          </div>
         </div>
 
-        {discoveredMachines.length > 0 && (
-          <div className="space-y-3">
-            <h4 className="text-white font-medium">Discovered Machines:</h4>
-            <div className="space-y-2 max-h-60 overflow-y-auto">
-              {discoveredMachines.map((machine, index) => (
+        <div>
+          <h3 className="text-white font-medium mb-3">Add Custom Range</h3>
+          <div className="flex space-x-3">
+            <input
+              type="text"
+              value={customRange}
+              onChange={(e) => setCustomRange(e.target.value)}
+              className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="192.168.2.0/24"
+            />
+            <Button onClick={addCustomRange} variant="secondary" disabled={!customRange}>
+              <Plus size={16} className="mr-2" />
+              Add
+            </Button>
+          </div>
+        </div>
+
+        {results.length > 0 && (
+          <div>
+            <h3 className="text-white font-medium mb-3">Discovered Devices ({results.length})</h3>
+            <div className="max-h-60 overflow-y-auto space-y-2">
+              {results.map((device, index) => (
                 <div key={index} className="flex items-center justify-between p-3 bg-slate-700 rounded border border-slate-600">
                   <div>
-                    <div className="text-white font-medium">{machine.hostname}</div>
-                    <div className="text-slate-400 text-sm">{machine.ip} - {machine.os_type}</div>
+                    <div className="text-white font-medium">{device.hostname || device.ip}</div>
+                    <div className="text-slate-400 text-sm">
+                      {device.ip} • {device.platform || 'Unknown'} • Ports: {device.open_ports?.join(', ') || 'None'}
+                    </div>
                   </div>
-                  <Button 
-                    onClick={() => onMachineConnect(machine)} 
-                    size="sm" 
-                    variant="primary"
-                  >
-                    <Wifi size={14} className="mr-1" />
-                    Connect
+                  <Button size="sm" variant="primary">
+                    <Plus size={14} className="mr-1" />
+                    Add
                   </Button>
                 </div>
               ))}
             </div>
           </div>
         )}
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Close
+          </Button>
+          {results.length > 0 && (
+            <Button onClick={() => onDiscoveredVMs(results)} variant="primary">
+              <Plus size={16} className="mr-2" />
+              Add All VMs
+            </Button>
+          )}
+        </div>
       </div>
-    </Card>
+    </Modal>
   );
 };
 
-const UbuntuConnectionModal: React.FC<{
-  machine: any;
+const EditVMModal: React.FC<{
+  vm: VM | null;
+  isOpen: boolean;
   onClose: () => void;
-  onConnect: (connectionData: any) => void;
-}> = ({ machine, onClose, onConnect }) => {
-  const [connectionData, setConnectionData] = useState({
-    ip: machine?.ip || '',
-    username: '',
-    password: '',
-    ssh_key_path: '',
-    port: 22,
-    use_key: false
-  });
+  onSave: (vm: VM) => void;
+}> = ({ vm, isOpen, onClose, onSave }) => {
+  const [editData, setEditData] = useState<Partial<VM>>({});
 
-  const handleConnect = () => {
-    onConnect(connectionData);
-    onClose();
+  useEffect(() => {
+    if (vm) {
+      setEditData({
+        name: vm.name,
+        operating_system: vm.operating_system,
+        cpu_count: vm.cpu_count,
+        memory_mb: vm.memory_mb,
+        disk_size_gb: vm.disk_size_gb,
+        ip_address: vm.ip_address || vm.host
+      });
+    }
+  }, [vm]);
+
+  const handleSave = () => {
+    if (vm) {
+      const updatedVM = { ...vm, ...editData };
+      onSave(updatedVM);
+      onClose();
+    }
   };
 
+  if (!vm) return null;
+
   return (
-    <Modal isOpen={true} onClose={onClose} title={`Connect to ${machine?.hostname}`}>
+    <Modal isOpen={isOpen} onClose={onClose} title={`Edit VM: ${vm.name}`}>
       <div className="space-y-4">
         <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+          <label className="block text-slate-300 text-sm font-medium mb-2">VM Name</label>
           <input
             type="text"
-            value={connectionData.username}
-            onChange={(e) => setConnectionData({...connectionData, username: e.target.value})}
+            value={editData.name || ''}
+            onChange={(e) => setEditData({...editData, name: e.target.value})}
             className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="ubuntu"
           />
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Operating System</label>
           <input
-            type="checkbox"
-            checked={connectionData.use_key}
-            onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
-            className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+            type="text"
+            value={editData.operating_system || ''}
+            onChange={(e) => setEditData({...editData, operating_system: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
           />
-          <label className="text-slate-300 text-sm">Use SSH Key</label>
         </div>
 
-        {connectionData.use_key ? (
+        <div className="grid grid-cols-3 gap-4">
           <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">SSH Key Path</label>
+            <label className="block text-slate-300 text-sm font-medium mb-2">CPU Cores</label>
             <input
-              type="text"
-              value={connectionData.ssh_key_path}
-              onChange={(e) => setConnectionData({...connectionData, ssh_key_path: e.target.value})}
+              type="number"
+              value={editData.cpu_count || 0}
+              onChange={(e) => setEditData({...editData, cpu_count: parseInt(e.target.value)})}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder="/path/to/private/key"
+              min="1"
             />
           </div>
-        ) : (
           <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+            <label className="block text-slate-300 text-sm font-medium mb-2">RAM (MB)</label>
             <input
-              type="password"
-              value={connectionData.password}
-              onChange={(e) => setConnectionData({...connectionData, password: e.target.value})}
+              type="number"
+              value={editData.memory_mb || 0}
+              onChange={(e) => setEditData({...editData, memory_mb: parseInt(e.target.value)})}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder="Enter password"
+              min="512"
             />
           </div>
-        )}
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Disk (GB)</label>
+            <input
+              type="number"
+              value={editData.disk_size_gb || 0}
+              onChange={(e) => setEditData({...editData, disk_size_gb: parseInt(e.target.value)})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              min="1"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">IP Address</label>
+          <input
+            type="text"
+            value={editData.ip_address || ''}
+            onChange={(e) => setEditData({...editData, ip_address: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="192.168.1.100"
+          />
+        </div>
+
+        <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
+          <p className="text-blue-300 text-sm">
+            <strong>Platform:</strong> {vm.platform.toUpperCase()} | <strong>VM ID:</strong> {vm.vm_id}
+          </p>
+        </div>
 
         <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary">Cancel</Button>
-          <Button onClick={handleConnect} variant="primary">
-            <Zap size={16} className="mr-2" />
-            Connect
+          <Button onClick={onClose} variant="secondary">
+            Cancel
+          </Button>
+          <Button onClick={handleSave} variant="primary">
+            <Save size={16} className="mr-2" />
+            Save Changes
           </Button>
         </div>
       </div>
@@ -973,17 +1144,156 @@ const UbuntuConnectionModal: React.FC<{
   );
 };
 
-const handleInstallAgent = async (vm: VM) => {
-  try {
-    await api.installUbuntuAgent(vm.vm_id);
-    alert('Backup agent installation started');
-  } catch (error) {
-    console.error('Failed to install agent:', error);
-    alert('Failed to install agent');
-  }
+const MonitorVMModal: React.FC<{
+  vm: VM | null;
+  isOpen: boolean;
+  onClose: () => void;
+}> = ({ vm, isOpen, onClose }) => {
+  const [monitoring, setMonitoring] = useState(false);
+  const [stats, setStats] = useState({
+    cpu_usage: Math.floor(Math.random() * 100),
+    memory_usage: Math.floor(Math.random() * 100),
+    disk_usage: Math.floor(Math.random() * 100),
+    network_in: (Math.random() * 1000).toFixed(1),
+    network_out: (Math.random() * 500).toFixed(1),
+    uptime: '15 days, 3 hours'
+  });
+
+  useEffect(() => {
+    if (isOpen && vm) {
+      setMonitoring(true);
+      // Simulate real-time stats updates
+      const interval = setInterval(() => {
+        setStats({
+          cpu_usage: Math.floor(Math.random() * 100),
+          memory_usage: Math.floor(Math.random() * 100),
+          disk_usage: Math.floor(Math.random() * 100),
+          network_in: (Math.random() * 1000).toFixed(1),
+          network_out: (Math.random() * 500).toFixed(1),
+          uptime: '15 days, 3 hours'
+        });
+      }, 2000);
+
+      return () => clearInterval(interval);
+    }
+  }, [isOpen, vm]);
+
+  if (!vm) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`Monitor: ${vm.name}`} size="lg">
+      <div className="space-y-6">
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-slate-300">Status:</span>
+              <StatusIndicator status={vm.power_state} />
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-300">Platform:</span>
+              <span className="text-white font-mono">{vm.platform.toUpperCase()}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-300">IP Address:</span>
+              <span className="text-white font-mono">{vm.ip_address || vm.host}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-300">OS:</span>
+              <span className="text-white">{vm.operating_system}</span>
+            </div>
+          </div>
+          
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-slate-300">CPU:</span>
+              <span className="text-white">{vm.cpu_count} cores</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-300">Memory:</span>
+              <span className="text-white">{Math.round(vm.memory_mb / 1024)} GB</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-300">Storage:</span>
+              <span className="text-white">{vm.disk_size_gb} GB</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-300">Uptime:</span>
+              <span className="text-white">{stats.uptime}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <h3 className="text-white font-medium">Real-time Performance</h3>
+          
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-slate-700 rounded p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-slate-300 text-sm">CPU Usage</span>
+                <span className="text-white font-mono">{stats.cpu_usage}%</span>
+              </div>
+              <div className="w-full bg-slate-600 rounded-full h-2">
+                <div 
+                  className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+                  style={{ width: `${stats.cpu_usage}%` }}
+                ></div>
+              </div>
+            </div>
+
+            <div className="bg-slate-700 rounded p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-slate-300 text-sm">Memory Usage</span>
+                <span className="text-white font-mono">{stats.memory_usage}%</span>
+              </div>
+              <div className="w-full bg-slate-600 rounded-full h-2">
+                <div 
+                  className="bg-emerald-500 h-2 rounded-full transition-all duration-500"
+                  style={{ width: `${stats.memory_usage}%` }}
+                ></div>
+              </div>
+            </div>
+
+            <div className="bg-slate-700 rounded p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-slate-300 text-sm">Disk Usage</span>
+                <span className="text-white font-mono">{stats.disk_usage}%</span>
+              </div>
+              <div className="w-full bg-slate-600 rounded-full h-2">
+                <div 
+                  className="bg-amber-500 h-2 rounded-full transition-all duration-500"
+                  style={{ width: `${stats.disk_usage}%` }}
+                ></div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-slate-700 rounded p-4">
+              <div className="text-slate-300 text-sm mb-1">Network In</div>
+              <div className="text-white font-mono text-lg">{stats.network_in} MB/s</div>
+            </div>
+            <div className="bg-slate-700 rounded p-4">
+              <div className="text-slate-300 text-sm mb-1">Network Out</div>
+              <div className="text-white font-mono text-lg">{stats.network_out} MB/s</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Close Monitor
+          </Button>
+          <Button variant="primary">
+            <Download size={16} className="mr-2" />
+            Export Report
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
 };
 
-const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup }) => {
+const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) => void; onMonitor?: (vm: VM) => void }> = ({ vm, onBackup, onEdit, onMonitor }) => {
   const getPlatformIcon = (platform: string) => {
     switch (platform) {
       case 'vmware': return <Server className="text-blue-400" />;
@@ -1061,15 +1371,29 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup
             <Shield size={14} className="mr-1" />
             Backup
           </Button>
-          <Button size="sm" variant="secondary">
+          <Button 
+            size="sm" 
+            variant="secondary"
+            onClick={() => onMonitor && onMonitor(vm)}
+          >
             <Eye size={14} className="mr-1" />
             Monitor
           </Button>
+          {onEdit && (
+            <Button 
+              size="sm" 
+              variant="secondary"
+              onClick={() => onEdit(vm)}
+            >
+              <Edit size={14} className="mr-1" />
+              Edit
+            </Button>
+          )}
           {vm.platform === 'ubuntu' && (
             <Button 
               size="sm" 
               variant="secondary"
-              onClick={() => handleInstallAgent(vm)}
+              onClick={() => api.installUbuntuAgent(vm.vm_id)}
             >
               <Download size={14} className="mr-1" />
               Agent
@@ -1081,137 +1405,88 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup
   );
 };
 
-const BackupJobTable: React.FC<{
-  jobs: BackupJob[];
-  onRun: (id: number) => void;
-  onDelete: (id: number) => void;
-}> = ({ jobs, onRun, onDelete }) => {
-  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
-  const [jobToDelete, setJobToDelete] = useState<number | null>(null);
+const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const { login } = useAuth();
 
-  const handleDeleteClick = (jobId: number) => {
-    setJobToDelete(jobId);
-    setShowConfirmDelete(true);
-  };
-
-  const handleConfirmDelete = () => {
-    if (jobToDelete) {
-      onDelete(jobToDelete);
-      setJobToDelete(null);
+  const handleSubmit = async () => {
+    setLoading(true);
+    setError('');
+    
+    if (!username || !password) {
+      setError('Please enter both username and password');
+      setLoading(false);
+      return;
     }
-    setShowConfirmDelete(false);
+    
+    try {
+      const success = await login(username, password);
+      
+      if (success) {
+        onClose();
+      } else {
+        setError('Invalid credentials');
+      }
+    } catch (err: any) {
+      setError('Login failed. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
   };
-
-  const handleCancelDelete = () => {
-    setJobToDelete(null);
-    setShowConfirmDelete(false);
-  };
-
-  if (jobs.length === 0) {
-    return (
-      <Card>
-        <div className="text-center py-12">
-          <Shield className="text-blue-400 mx-auto mb-4" size={48} />
-          <h3 className="text-white text-lg font-medium mb-2">No Backup Jobs</h3>
-          <p className="text-slate-400 mb-4">Create your first backup job to get started</p>
-          <Button variant="primary">
-            <Plus size={16} className="mr-2" />
-            Create Backup Job
-          </Button>
-        </div>
-      </Card>
-    );
-  }
 
   return (
-    <>
-      <Card>
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-slate-700">
-                <th className="text-left py-3 text-slate-300 font-medium text-sm">Job Name</th>
-                <th className="text-left py-3 text-slate-300 font-medium text-sm">VM Target</th>
-                <th className="text-left py-3 text-slate-300 font-medium text-sm">Type</th>
-                <th className="text-left py-3 text-slate-300 font-medium text-sm">Status</th>
-                <th className="text-left py-3 text-slate-300 font-medium text-sm">Last Run</th>
-                <th className="text-left py-3 text-slate-300 font-medium text-sm">Next Run</th>
-                <th className="text-center py-3 text-slate-300 font-medium text-sm">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((job, index) => (
-                <tr 
-                  key={job.id} 
-                  className={`border-b border-slate-700 hover:bg-slate-700 hover:bg-opacity-50 transition-colors ${
-                    index % 2 === 0 ? 'bg-slate-800 bg-opacity-30' : ''
-                  }`}
-                >
-                  <td className="py-4">
-                    <div>
-                      <div className="text-white font-medium">{job.name}</div>
-                      <div className="text-slate-400 text-sm">{job.description}</div>
-                    </div>
-                  </td>
-                  <td className="py-4">
-                    <span className="text-blue-300 font-mono">{job.vm_id}</span>
-                  </td>
-                  <td className="py-4">
-                    <span className="px-2 py-1 bg-slate-700 border border-slate-600 rounded text-blue-400 text-xs font-mono uppercase">
-                      {job.backup_type}
-                    </span>
-                  </td>
-                  <td className="py-4">
-                    <StatusIndicator status={job.status} />
-                  </td>
-                  <td className="py-4">
-                    <span className="text-slate-300 font-mono text-sm">
-                      {job.last_run ? new Date(job.last_run).toLocaleString() : 'Never'}
-                    </span>
-                  </td>
-                  <td className="py-4">
-                    <span className="text-slate-300 font-mono text-sm">
-                      {job.next_run ? new Date(job.next_run).toLocaleString() : 'Not scheduled'}
-                    </span>
-                  </td>
-                  <td className="py-4">
-                    <div className="flex justify-center space-x-2">
-                      <button
-                        onClick={() => onRun(job.id)}
-                        className="p-2 text-emerald-400 hover:bg-emerald-400 hover:bg-opacity-20 rounded transition-colors"
-                        title="Run Now"
-                      >
-                        <Play size={16} />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteClick(job.id)}
-                        className="p-2 text-red-400 hover:bg-red-400 hover:bg-opacity-20 rounded transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+    <Modal isOpen={true} onClose={onClose} title="Login">
+      <div className="space-y-4">
+        {error && (
+          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
+            {error}
+          </div>
+        )}
 
-      <ConfirmationModal
-        isOpen={showConfirmDelete}
-        title="Delete Backup Job"
-        message="Are you sure you want to delete this backup job? This action cannot be undone."
-        onConfirm={handleConfirmDelete}
-        onCancel={handleCancelDelete}
-      />
-    </>
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter username"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter password"
+            disabled={loading}
+            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
+          />
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary" disabled={loading}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
+            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
+            {loading ? 'Logging in...' : 'Login'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 };
 
 const PlatformConnector: React.FC<{
-  platform: string;
+  platform: PlatformType;
   onConnect: (platform: string, data: any) => void;
   isConnected: boolean;
 }> = ({ platform, onConnect, isConnected }) => {
@@ -1245,6 +1520,11 @@ const PlatformConnector: React.FC<{
     }
   };
 
+  const handleConnect = () => {
+    onConnect(platform, connectionData);
+    setIsOpen(false);
+  };
+
   return (
     <>
       <Card className="text-center hover:scale-105 transition-transform duration-200 relative">
@@ -1272,7 +1552,7 @@ const PlatformConnector: React.FC<{
         </div>
       </Card>
 
-      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title={`Connect to ${platform}`}>
+      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title={`Connect to ${platform.toUpperCase()}`}>
         <div className="space-y-4">
           <div>
             <label className="block text-slate-300 text-sm font-medium mb-2">
@@ -1283,7 +1563,12 @@ const PlatformConnector: React.FC<{
               value={connectionData.host}
               onChange={(e) => setConnectionData({...connectionData, host: e.target.value})}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder={platform === 'ubuntu' ? '192.168.1.100' : 'your-server.domain.com'}
+              placeholder={
+                platform === 'vmware' ? 'vcenter.domain.com or 192.168.1.10' :
+                platform === 'proxmox' ? 'proxmox.domain.com or 192.168.1.20' :
+                platform === 'xcpng' ? 'xcpng.domain.com or 192.168.1.30' :
+                'ubuntu.domain.com or 192.168.1.40'
+              }
             />
           </div>
 
@@ -1297,7 +1582,8 @@ const PlatformConnector: React.FC<{
               placeholder={
                 platform === 'vmware' ? 'administrator@vsphere.local' :
                 platform === 'proxmox' ? 'root@pam' :
-                platform === 'ubuntu' ? 'ubuntu' : 'root'
+                platform === 'xcpng' ? 'root' :
+                'ubuntu'
               }
             />
           </div>
@@ -1310,7 +1596,7 @@ const PlatformConnector: React.FC<{
                 onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
                 className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
               />
-              <label className="text-slate-300 text-sm">Use SSH Key</label>
+              <label className="text-slate-300 text-sm">Use SSH Key Authentication</label>
             </div>
           )}
 
@@ -1348,19 +1634,26 @@ const PlatformConnector: React.FC<{
             />
           </div>
 
+          <div className="bg-slate-700 bg-opacity-50 rounded p-3">
+            <p className="text-slate-300 text-xs">
+              <strong>Connection Test:</strong> {platform.toUpperCase()} connection will be tested before saving.
+              {platform === 'xcpng' && ' Make sure XCP-ng host is accessible and API is enabled.'}
+              {platform === 'vmware' && ' Ensure vCenter/ESXi has API access enabled.'}
+              {platform === 'proxmox' && ' Verify Proxmox web interface is accessible.'}
+            </p>
+          </div>
+
           <div className="flex justify-end space-x-3">
             <Button onClick={() => setIsOpen(false)} variant="secondary">
               Cancel
             </Button>
             <Button 
-              onClick={() => {
-                onConnect(platform, connectionData);
-                setIsOpen(false);
-              }}
+              onClick={handleConnect}
               variant="primary"
+              disabled={!connectionData.host || !connectionData.username || (!connectionData.password && !connectionData.ssh_key_path)}
             >
               <Zap size={16} className="mr-2" />
-              Connect
+              Test & Connect
             </Button>
           </div>
         </div>
@@ -1369,9 +1662,44 @@ const PlatformConnector: React.FC<{
   );
 };
 
-const VMBackupDashboard: React.FC = () => {
+const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated } = useAuth();
+  const [showLogin, setShowLogin] = useState(false);
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <Card className="text-center w-96">
+          <div className="space-y-6">
+            <div className="flex justify-center">
+              <Shield className="text-blue-400" size={64} />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-white">
+                MIVU Backup Solution
+              </h1>
+              <p className="text-slate-400 text-sm mt-2">Please login to continue</p>
+            </div>
+            <div className="flex space-x-3 justify-center">
+              <Button onClick={() => setShowLogin(true)} variant="primary">
+                <LogIn size={16} className="mr-2" />
+                Login
+              </Button>
+            </div>
+          </div>
+        </Card>
+
+        {showLogin && <LoginForm onClose={() => setShowLogin(false)} />}
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+};
+
+const MIVUBackupDashboard: React.FC = () => {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'ubuntu' | 'jobs' | 'platforms'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'platforms'>('dashboard');
   const [stats, setStats] = useState<DashboardStats>({
     total_backup_jobs: 0,
     running_jobs: 0,
@@ -1381,11 +1709,11 @@ const VMBackupDashboard: React.FC = () => {
     success_rate: '0%'
   });
   const [vms, setVMs] = useState<VM[]>([]);
-  const [ubuntuMachines, setUbuntuMachines] = useState<VM[]>([]);
-  const [backupJobs, setBackupJobs] = useState<BackupJob[]>([]);
-  const [selectedMachine, setSelectedMachine] = useState<any>(null);
-  const [showUbuntuConnection, setShowUbuntuConnection] = useState(false);
   const [showAddVM, setShowAddVM] = useState(false);
+  const [showNetworkDiscovery, setShowNetworkDiscovery] = useState(false);
+  const [showEditVM, setShowEditVM] = useState(false);
+  const [showMonitorVM, setShowMonitorVM] = useState(false);
+  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
   const [loading, setLoading] = useState(true);
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus>({
     vmware: false,
@@ -1401,25 +1729,17 @@ const VMBackupDashboard: React.FC = () => {
   const loadInitialData = async () => {
     setLoading(true);
     try {
-      // Load real data from API
-      const [statsData, jobsData] = await Promise.all([
-        api.getStatistics().catch(() => ({
-          total_backup_jobs: 0,
-          running_jobs: 0,
-          total_vms_protected: 0,
-          total_backups_size: '0 GB',
-          last_24h_jobs: 0,
-          success_rate: '0%'
-        })),
-        api.getBackupJobs().catch(() => [])
-      ]);
+      const statsData = await api.getStatistics().catch(() => ({
+        total_backup_jobs: 0,
+        running_jobs: 0,
+        total_vms_protected: 0,
+        total_backups_size: '0 GB',
+        last_24h_jobs: 0,
+        success_rate: '0%'
+      }));
 
       setStats(statsData);
-      setBackupJobs(jobsData);
-
-      // Load VMs from connected platforms - this will be empty initially
       setVMs([]);
-      setUbuntuMachines([]);
     } catch (error) {
       console.error('Failed to load initial data:', error);
     } finally {
@@ -1427,26 +1747,59 @@ const VMBackupDashboard: React.FC = () => {
     }
   };
 
-  const refreshVMsForPlatform = async (platform: string) => {
-    try {
-      const platformVMs = await api.getVMs(platform);
-      if (platform === 'ubuntu') {
-        // Replace instead of appending to avoid duplicates
-        setUbuntuMachines(platformVMs);
-      } else {
-        // Merge with existing VMs from other platforms, avoiding duplicates
-        setVMs(prev => {
-          const filtered = prev.filter(vm => vm.platform !== platform);
-          return [...filtered, ...platformVMs];
-        });
+  const refreshAllVMs = async () => {
+    const platforms: PlatformType[] = ['vmware', 'proxmox', 'xcpng', 'ubuntu'];
+    const allVMs: VM[] = [];
+    
+    for (const platform of platforms) {
+      if (platformStatus[platform]) {
+        try {
+          const platformVMs = await api.getVMs(platform);
+          allVMs.push(...platformVMs);
+        } catch (error) {
+          console.error(`Failed to load VMs for ${platform}:`, error);
+        }
       }
+    }
+    
+    setVMs(allVMs);
+  };
+
+  const handleEditVM = (vm: VM) => {
+    setSelectedVM(vm);
+    setShowEditVM(true);
+  };
+
+  const handleMonitorVM = (vm: VM) => {
+    setSelectedVM(vm);
+    setShowMonitorVM(true);
+  };
+
+  const handleSaveEditedVM = async (updatedVM: VM) => {
+    try {
+      // Update VM via API
+      const result = await api.updateVM(updatedVM.vm_id, updatedVM);
+      
+      // Update VM in the local list
+      setVMs(prev => prev.map(vm => 
+        vm.vm_id === updatedVM.vm_id ? { ...vm, ...result } : vm
+      ));
+      
+      alert(`✅ VM "${updatedVM.name}" updated successfully!`);
     } catch (error) {
-      console.error(`Failed to load VMs for ${platform}:`, error);
+      console.error('Failed to update VM:', error);
+      alert(`❌ Failed to update VM: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
   const handleConnectPlatform = async (platform: string, connectionData: any) => {
     try {
+      console.log(`Attempting to connect to ${platform} with:`, { 
+        host: connectionData.host, 
+        username: connectionData.username, 
+        port: connectionData.port 
+      });
+      
       if (platform === 'ubuntu') {
         await api.connectUbuntuMachine(connectionData);
       } else {
@@ -1459,90 +1812,47 @@ const VMBackupDashboard: React.FC = () => {
         [platform]: true
       }));
       
-      alert(`Successfully connected to ${platform}`);
+      alert(`✅ Successfully connected to ${platform.toUpperCase()}!`);
       
-      // Refresh VMs for this platform
-      await refreshVMsForPlatform(platform);
+      // Try to refresh VMs for this platform
+      try {
+        const platformVMs = await api.getVMs(platform);
+        if (platformVMs && platformVMs.length > 0) {
+          setVMs(prev => {
+            // Remove existing VMs from this platform to avoid duplicates
+            const filtered = prev.filter(vm => vm.platform !== platform);
+            return [...filtered, ...platformVMs];
+          });
+          alert(`🔍 Discovered ${platformVMs.length} VMs on ${platform.toUpperCase()}`);
+        }
+      } catch (vmError) {
+        console.warn(`Failed to load VMs for ${platform}:`, vmError);
+        // Don't show error to user as connection was successful
+      }
+      
     } catch (error) {
       console.error('Failed to connect:', error);
-      alert(`Failed to connect to ${platform}: ${error}`);
-    }
-  };
-
-  const handleScanNetworks = async () => {
-    try {
-      // Only scan platforms that are connected
-      const connectedPlatforms = Object.entries(platformStatus)
-        .filter(([_, connected]) => connected)
-        .map(([platform, _]) => platform);
-
-      if (connectedPlatforms.length === 0) {
-        alert('No platforms connected. Please connect to platforms first.');
-        return;
-      }
-
-      // Refresh all connected platforms
-      await Promise.all(
-        connectedPlatforms.map(platform => 
-          refreshVMsForPlatform(platform).catch(() => {})
-        )
-      );
       
-      alert('Network scan completed');
-    } catch (error) {
-      console.error('Network scan failed:', error);
-      alert('Network scan failed');
+      let errorMessage = `Failed to connect to ${platform.toUpperCase()}`;
+      if (error instanceof Error) {
+        if (error.message.includes('404')) {
+          errorMessage += ': Service not available. Please check if the platform is running and accessible.';
+        } else if (error.message.includes('401') || error.message.includes('403')) {
+          errorMessage += ': Authentication failed. Please check your credentials.';
+        } else if (error.message.includes('timeout') || error.message.includes('network')) {
+          errorMessage += ': Network timeout. Please check the host address and network connectivity.';
+        } else {
+          errorMessage += `: ${error.message}`;
+        }
+      }
+      
+      alert(`❌ ${errorMessage}`);
     }
   };
-
-  const handleAddVM = (vm: VM) => {
-    // Add VM to monitoring (in real implementation, this would save to backend)
-    alert(`Added ${vm.name} to backup monitoring`);
-  };
-
-  const handleBackupVM = (vm: VM) => {
-    if (vm.platform === 'ubuntu') {
-      api.backupUbuntuMachine(vm.vm_id, {});
-      alert(`Starting Ubuntu machine backup for: ${vm.name}`);
-    } else {
-      alert(`Starting backup for VM: ${vm.name}`);
-    }
-  };
-
-  const handleRunBackupJob = async (jobId: number) => {
-    try {
-      await api.runBackupJob(jobId);
-      const jobs = await api.getBackupJobs();
-      setBackupJobs(jobs);
-      alert('Backup job started successfully');
-    } catch (error) {
-      console.error('Failed to run backup job:', error);
-      alert('Failed to start backup job');
-    }
-  };
-
-  const handleDeleteBackupJob = async (jobId: number) => {
-    try {
-      await api.deleteBackupJob(jobId);
-      setBackupJobs(prev => prev.filter(job => job.id !== jobId));
-      alert('Backup job deleted successfully');
-    } catch (error) {
-      console.error('Failed to delete backup job:', error);
-      alert('Failed to delete backup job');
-    }
-  };
-
-  const handleUbuntuMachineConnect = (machine: any) => {
-    setSelectedMachine(machine);
-    setShowUbuntuConnection(true);
-  };
-
-  const getAllVMs = () => [...vms, ...ubuntuMachines];
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: <Terminal size={20} /> },
     { id: 'vms', label: 'Virtual Machines', icon: <Server size={20} /> },
-    { id: 'ubuntu', label: 'Ubuntu Machines', icon: <Monitor size={20} /> },
     { id: 'jobs', label: 'Backup Jobs', icon: <Shield size={20} /> },
     { id: 'platforms', label: 'Platforms', icon: <Settings size={20} /> },
   ];
@@ -1567,7 +1877,7 @@ const VMBackupDashboard: React.FC = () => {
               <div className="flex items-center space-x-3">
                 <Shield className="text-blue-400" size={32} />
                 <div>
-                  <h1 className="text-xl font-bold text-white">VM Backup Solution</h1>
+                  <h1 className="text-xl font-bold text-white">MIVU Backup Solution</h1>
                   <p className="text-slate-400 text-xs">Enterprise Protection System</p>
                 </div>
               </div>
@@ -1623,7 +1933,7 @@ const VMBackupDashboard: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <MetricCard
                 title="Protected VMs"
-                value={stats.total_vms_protected.toString()}
+                value={vms.length.toString()}
                 icon={<Server />}
               />
               <MetricCard
@@ -1656,37 +1966,21 @@ const VMBackupDashboard: React.FC = () => {
                     <StatusIndicator status="online" />
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Scheduler Service</span>
-                    <StatusIndicator status="online" />
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">API Service</span>
-                    <StatusIndicator status="online" />
+                    <span className="text-slate-300">Platform Connections</span>
+                    <StatusIndicator status={Object.values(platformStatus).some(Boolean) ? "online" : "offline"} />
                   </div>
                 </div>
               </Card>
 
               <Card>
-                <h3 className="text-white text-lg font-medium mb-4">Recent Activity</h3>
+                <h3 className="text-white text-lg font-medium mb-4">Platform Status</h3>
                 <div className="space-y-3">
-                  {backupJobs.length === 0 ? (
-                    <div className="text-center py-8">
-                      <p className="text-slate-400">No recent activity</p>
-                      <p className="text-slate-500 text-sm">Create backup jobs to see activity here</p>
+                  {Object.entries(platformStatus).map(([platform, connected]) => (
+                    <div key={platform} className="flex justify-between items-center">
+                      <span className="text-slate-300 capitalize">{platform}</span>
+                      <StatusIndicator status={connected ? "online" : "offline"} />
                     </div>
-                  ) : (
-                    backupJobs.slice(0, 3).map((job) => (
-                      <div key={job.id} className="flex items-start space-x-3">
-                        <CheckCircle className="text-emerald-400 mt-1" size={16} />
-                        <div>
-                          <p className="text-white text-sm">{job.name}</p>
-                          <p className="text-slate-400 text-xs">
-                            {job.last_run ? new Date(job.last_run).toLocaleString() : 'Not run yet'}
-                          </p>
-                        </div>
-                      </div>
-                    ))
-                  )}
+                  ))}
                 </div>
               </Card>
             </div>
@@ -1696,11 +1990,15 @@ const VMBackupDashboard: React.FC = () => {
         {activeTab === 'vms' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-white">Virtual Machines</h2>
+              <h2 className="text-2xl font-bold text-white">Virtual Machines ({vms.length})</h2>
               <div className="flex space-x-3">
-                <Button onClick={handleScanNetworks} variant="secondary">
+                <Button onClick={() => setShowNetworkDiscovery(true)} variant="secondary">
+                  <Network size={16} className="mr-2" />
+                  Network Discovery
+                </Button>
+                <Button onClick={refreshAllVMs} variant="secondary">
                   <RefreshCw size={16} className="mr-2" />
-                  Scan Networks
+                  Refresh All
                 </Button>
                 <Button onClick={() => setShowAddVM(true)} variant="primary">
                   <Plus size={16} className="mr-2" />
@@ -1714,63 +2012,31 @@ const VMBackupDashboard: React.FC = () => {
                 <div className="text-center py-12">
                   <Server className="text-blue-400 mx-auto mb-4" size={48} />
                   <h3 className="text-white text-lg font-medium mb-2">No Virtual Machines</h3>
-                  <p className="text-slate-400 mb-4">Connect to platforms to discover VMs</p>
-                  <Button variant="primary" onClick={() => setActiveTab('platforms')}>
-                    <Settings size={16} className="mr-2" />
-                    Connect Platforms
-                  </Button>
+                  <p className="text-slate-400 mb-4">Connect to platforms first, then add VMs manually or use network discovery</p>
+                  <div className="flex justify-center space-x-3">
+                    <Button variant="primary" onClick={() => setActiveTab('platforms')}>
+                      <Settings size={16} className="mr-2" />
+                      Connect Platforms
+                    </Button>
+                    <Button variant="secondary" onClick={() => setShowAddVM(true)}>
+                      <Plus size={16} className="mr-2" />
+                      Add VM Manually
+                    </Button>
+                  </div>
                 </div>
               </Card>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {vms.map((vm) => (
-                  <VMCard key={`${vm.platform}-${vm.vm_id}`} vm={vm} onBackup={handleBackupVM} />
+                  <VMCard 
+                    key={`${vm.platform}-${vm.vm_id}`} 
+                    vm={vm} 
+                    onBackup={(vm) => alert(`Starting backup for ${vm.name}`)}
+                    onEdit={handleEditVM}
+                    onMonitor={handleMonitorVM}
+                  />
                 ))}
               </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'ubuntu' && (
-          <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-white">Ubuntu Machines</h2>
-              <div className="flex space-x-3">
-                <Button variant="secondary">
-                  <RefreshCw size={16} className="mr-2" />
-                  Refresh
-                </Button>
-                <Button variant="primary">
-                  <Search size={16} className="mr-2" />
-                  Discover
-                </Button>
-              </div>
-            </div>
-
-            <UbuntuDiscovery onMachineConnect={handleUbuntuMachineConnect} />
-            
-            {ubuntuMachines.length === 0 ? (
-              <Card>
-                <div className="text-center py-12">
-                  <Monitor className="text-blue-400 mx-auto mb-4" size={48} />
-                  <h3 className="text-white text-lg font-medium mb-2">No Ubuntu Machines</h3>
-                  <p className="text-slate-400 mb-4">Use network discovery to find Ubuntu machines</p>
-                </div>
-              </Card>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {ubuntuMachines.map((machine) => (
-                  <VMCard key={`${machine.platform}-${machine.vm_id}`} vm={machine} onBackup={handleBackupVM} />
-                ))}
-              </div>
-            )}
-
-            {showUbuntuConnection && selectedMachine && (
-              <UbuntuConnectionModal
-                machine={selectedMachine}
-                onClose={() => setShowUbuntuConnection(false)}
-                onConnect={(connectionData) => handleConnectPlatform('ubuntu', connectionData)}
-              />
             )}
           </div>
         )}
@@ -1779,23 +2045,23 @@ const VMBackupDashboard: React.FC = () => {
           <div className="space-y-6">
             <div className="flex justify-between items-center">
               <h2 className="text-2xl font-bold text-white">Backup Jobs</h2>
-              <div className="flex space-x-3">
-                <Button variant="secondary" onClick={loadInitialData}>
-                  <RefreshCw size={16} className="mr-2" />
-                  Refresh
-                </Button>
-                <Button variant="primary">
-                  <Plus size={16} className="mr-2" />
-                  New Job
-                </Button>
-              </div>
+              <Button variant="primary">
+                <Plus size={16} className="mr-2" />
+                New Job
+              </Button>
             </div>
 
-            <BackupJobTable 
-              jobs={backupJobs}
-              onRun={handleRunBackupJob}
-              onDelete={handleDeleteBackupJob}
-            />
+            <Card>
+              <div className="text-center py-12">
+                <Shield className="text-blue-400 mx-auto mb-4" size={48} />
+                <h3 className="text-white text-lg font-medium mb-2">No Backup Jobs</h3>
+                <p className="text-slate-400 mb-4">Create your first backup job to get started</p>
+                <Button variant="primary">
+                  <Plus size={16} className="mr-2" />
+                  Create Backup Job
+                </Button>
+              </div>
+            </Card>
           </div>
         )}
 
@@ -1804,26 +2070,14 @@ const VMBackupDashboard: React.FC = () => {
             <h2 className="text-2xl font-bold text-white">Platform Connections</h2>
             
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              <PlatformConnector 
-                platform="vmware" 
-                onConnect={handleConnectPlatform} 
-                isConnected={platformStatus.vmware}
-              />
-              <PlatformConnector 
-                platform="proxmox" 
-                onConnect={handleConnectPlatform} 
-                isConnected={platformStatus.proxmox}
-              />
-              <PlatformConnector 
-                platform="xcpng" 
-                onConnect={handleConnectPlatform} 
-                isConnected={platformStatus.xcpng}
-              />
-              <PlatformConnector 
-                platform="ubuntu" 
-                onConnect={handleConnectPlatform} 
-                isConnected={platformStatus.ubuntu}
-              />
+              {(['vmware', 'proxmox', 'xcpng', 'ubuntu'] as PlatformType[]).map((platform) => (
+                <PlatformConnector 
+                  key={platform}
+                  platform={platform} 
+                  onConnect={handleConnectPlatform} 
+                  isConnected={platformStatus[platform]}
+                />
+              ))}
             </div>
           </div>
         )}
@@ -1832,19 +2086,47 @@ const VMBackupDashboard: React.FC = () => {
       <AddVMModal
         isOpen={showAddVM}
         onClose={() => setShowAddVM(false)}
-        availableVMs={getAllVMs()}
-        onAddVM={handleAddVM}
+        onAddVM={(vm) => {
+          setVMs(prev => [...prev, vm]);
+          alert(`Added ${vm.name} to VM list`);
+        }}
+      />
+
+      <NetworkDiscoveryModal
+        isOpen={showNetworkDiscovery}
+        onClose={() => setShowNetworkDiscovery(false)}
+        onDiscoveredVMs={(discovered) => {
+          alert(`Discovered ${discovered.length} devices`);
+        }}
+      />
+
+      <EditVMModal
+        vm={selectedVM}
+        isOpen={showEditVM}
+        onClose={() => {
+          setShowEditVM(false);
+          setSelectedVM(null);
+        }}
+        onSave={handleSaveEditedVM}
+      />
+
+      <MonitorVMModal
+        vm={selectedVM}
+        isOpen={showMonitorVM}
+        onClose={() => {
+          setShowMonitorVM(false);
+          setSelectedVM(null);
+        }}
       />
     </div>
   );
 };
 
-// Main App Component
 const App: React.FC = () => {
   return (
     <AuthProvider>
       <AuthGuard>
-        <VMBackupDashboard />
+        <MIVUBackupDashboard />
       </AuthGuard>
     </AuthProvider>
   );

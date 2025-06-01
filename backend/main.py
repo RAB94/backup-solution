@@ -204,6 +204,576 @@ async def create_backup_job(
         logger.error(f"Error creating backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/v1/vms/scan")
+async def scan_vm_by_ip(
+    scan_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Scan and detect VM by IP address"""
+    try:
+        ip = scan_data.get('ip')
+        platform = scan_data.get('platform', 'unknown')
+        username = scan_data.get('username', '')
+        password = scan_data.get('password', '')
+        port = scan_data.get('port', 22)
+        
+        logger.info(f"Scanning VM at {ip} for platform {platform}")
+        
+        if platform == 'ubuntu':
+            # Use Ubuntu connector for scanning
+            connector = connectors['ubuntu']
+            connection_params = {
+                'ip': ip,
+                'username': username,
+                'password': password,
+                'port': port
+            }
+            
+            if await connector.connect(connection_params):
+                machines = await connector.list_vms()
+                if machines:
+                    return machines[0]
+        
+        elif platform in ['vmware', 'proxmox', 'xcpng']:
+            # Try to connect to the platform and get VM info
+            connector = connectors.get(PlatformType(platform))
+            if connector:
+                connection_params = {
+                    'host': ip,
+                    'username': username,
+                    'password': password,
+                    'port': port
+                }
+                
+                if await connector.connect(connection_params):
+                    vms = await connector.list_vms()
+                    # Find VM that matches the IP or return first one
+                    for vm in vms:
+                        if vm.get('host') == ip or vm.get('ip_address') == ip:
+                            return vm
+                    if vms:
+                        return vms[0]
+        
+        # Fallback: create basic VM info from scan data
+        vm_info = {
+            'vm_id': f"manual-{ip}",
+            'name': f"{platform}-{ip}",
+            'platform': platform,
+            'host': ip,
+            'ip_address': ip,
+            'cpu_count': 2,
+            'memory_mb': 4096,
+            'disk_size_gb': 50,
+            'operating_system': 'Unknown',
+            'power_state': 'unknown',
+            'created_at': datetime.now().isoformat()
+        }
+        
+        return vm_info
+        
+    except Exception as e:
+        logger.error(f"VM scan failed: {e}")
+        raise HTTPException(status_code=500, detail=f"VM scan failed: {str(e)}")
+
+@app.post("/api/v1/vms/scan")
+async def scan_vm_by_ip(
+    scan_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Scan and detect VM by IP address"""
+    try:
+        ip = scan_data.get('ip')
+        platform = scan_data.get('platform', 'unknown')
+        username = scan_data.get('username', '')
+        password = scan_data.get('password', '')
+        port = scan_data.get('port', 22)
+        
+        logger.info(f"Scanning VM at {ip} for platform {platform}")
+        
+        if platform == 'ubuntu':
+            # Use Ubuntu connector for scanning
+            connector = connectors['ubuntu']
+            connection_params = {
+                'ip': ip,
+                'username': username,
+                'password': password,
+                'port': port
+            }
+            
+            if await connector.connect(connection_params):
+                machines = await connector.list_vms()
+                if machines:
+                    return machines[0]
+        
+        elif platform in ['vmware', 'proxmox', 'xcpng']:
+            # Try to connect to the platform and get VM info
+            connector = connectors.get(PlatformType(platform))
+            if connector:
+                connection_params = {
+                    'host': ip,
+                    'username': username,
+                    'password': password,
+                    'port': port
+                }
+                
+                if await connector.connect(connection_params):
+                    vms = await connector.list_vms()
+                    # Find VM that matches the IP or return first one
+                    for vm in vms:
+                        if vm.get('host') == ip or vm.get('ip_address') == ip:
+                            return vm
+                    if vms:
+                        return vms[0]
+        
+        # Fallback: create basic VM info from scan data
+        vm_info = {
+            'vm_id': f"manual-{ip}",
+            'name': f"{platform}-{ip}",
+            'platform': platform,
+            'host': ip,
+            'ip_address': ip,
+            'cpu_count': 2,
+            'memory_mb': 4096,
+            'disk_size_gb': 50,
+            'operating_system': 'Unknown',
+            'power_state': 'unknown',
+            'created_at': datetime.now().isoformat()
+        }
+        
+        return vm_info
+        
+    except Exception as e:
+        logger.error(f"VM scan failed: {e}")
+        raise HTTPException(status_code=500, detail=f"VM scan failed: {str(e)}")
+
+@app.post("/api/v1/vms/manual")
+async def add_vm_manually(
+    vm_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Add VM manually with user-provided information"""
+    try:
+        # Create VM record in database
+        db_vm = VirtualMachine(
+            vm_id=vm_data.get('vm_id', f"manual-{vm_data.get('ip_address', 'unknown')}"),
+            name=vm_data.get('name'),
+            platform=PlatformType(vm_data.get('platform')),
+            host=vm_data.get('ip_address'),
+            cpu_count=vm_data.get('cpu_count', 2),
+            memory_mb=vm_data.get('memory_mb', 4096),
+            disk_size_gb=vm_data.get('disk_size_gb', 50),
+            operating_system=vm_data.get('operating_system', 'Unknown'),
+            power_state='unknown',
+            vm_metadata={'manually_added': True, 'notes': vm_data.get('notes', '')}
+        )
+        
+        db.add(db_vm)
+        db.commit()
+        db.refresh(db_vm)
+        
+        return {
+            'id': db_vm.id,
+            'vm_id': db_vm.vm_id,
+            'name': db_vm.name,
+            'platform': db_vm.platform.value,
+            'host': db_vm.host,
+            'ip_address': db_vm.host,
+            'cpu_count': db_vm.cpu_count,
+            'memory_mb': db_vm.memory_mb,
+            'disk_size_gb': db_vm.disk_size_gb,
+            'operating_system': db_vm.operating_system,
+            'power_state': db_vm.power_state,
+            'created_at': db_vm.created_at.isoformat()
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to add VM manually: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add VM: {str(e)}")
+
+@app.put("/api/v1/vms/{vm_id}")
+async def update_vm(
+    vm_id: str,
+    vm_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Update VM information"""
+    try:
+        # Find existing VM in database
+        db_vm = db.query(VirtualMachine).filter(VirtualMachine.vm_id == vm_id).first()
+        
+        if not db_vm:
+            # Create new VM record if it doesn't exist
+            db_vm = VirtualMachine(
+                vm_id=vm_id,
+                name=vm_data.get('name', 'Unknown VM'),
+                platform=PlatformType(vm_data.get('platform', 'vmware')),
+                host=vm_data.get('ip_address', vm_data.get('host', 'unknown')),
+                cpu_count=vm_data.get('cpu_count', 2),
+                memory_mb=vm_data.get('memory_mb', 4096),
+                disk_size_gb=vm_data.get('disk_size_gb', 50),
+                operating_system=vm_data.get('operating_system', 'Unknown'),
+                power_state=vm_data.get('power_state', 'unknown'),
+                vm_metadata={'updated_via_api': True}
+            )
+            db.add(db_vm)
+        else:
+            # Update existing VM
+            if 'name' in vm_data:
+                db_vm.name = vm_data['name']
+            if 'operating_system' in vm_data:
+                db_vm.operating_system = vm_data['operating_system']
+            if 'cpu_count' in vm_data:
+                db_vm.cpu_count = vm_data['cpu_count']
+            if 'memory_mb' in vm_data:
+                db_vm.memory_mb = vm_data['memory_mb']
+            if 'disk_size_gb' in vm_data:
+                db_vm.disk_size_gb = vm_data['disk_size_gb']
+            if 'ip_address' in vm_data:
+                db_vm.host = vm_data['ip_address']
+            
+            db_vm.updated_at = datetime.now()
+        
+        db.commit()
+        db.refresh(db_vm)
+        
+        return {
+            'id': db_vm.id,
+            'vm_id': db_vm.vm_id,
+            'name': db_vm.name,
+            'platform': db_vm.platform.value,
+            'host': db_vm.host,
+            'ip_address': db_vm.host,
+            'cpu_count': db_vm.cpu_count,
+            'memory_mb': db_vm.memory_mb,
+            'disk_size_gb': db_vm.disk_size_gb,
+            'operating_system': db_vm.operating_system,
+            'power_state': db_vm.power_state,
+            'created_at': db_vm.created_at.isoformat()
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update VM {vm_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update VM: {str(e)}")
+
+@app.post("/api/v1/discovery/network")
+async def discover_network_range(
+    discovery_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Discover devices on network range"""
+    try:
+        network_range = discovery_data.get('network_range', '192.168.1.0/24')
+        logger.info(f"Discovering devices in network range: {network_range}")
+        
+        # Use Ubuntu network discovery as it's the most generic
+        ubuntu_connector = connectors.get('ubuntu')
+        if ubuntu_connector:
+            discovered = await ubuntu_connector.discover_ubuntu_machines(network_range)
+            
+            # Enhanced discovery - try to detect platform types
+            enhanced_devices = []
+            for device in discovered:
+                enhanced_device = device.copy()
+                
+                # Try to detect platform based on open ports and services
+                ip = device.get('ip')
+                if ip:
+                    try:
+                        import socket
+                        
+                        # Check for common virtualization platform ports
+                        platform_ports = {
+                            443: 'vmware',  # vCenter/ESXi HTTPS
+                            902: 'vmware',  # VMware Auth
+                            8006: 'proxmox',  # Proxmox Web UI
+                            80: 'xcpng',    # XCP-ng Web UI (also check for specific headers)
+                            22: 'ubuntu'    # SSH (Ubuntu/Linux)
+                        }
+                        
+                        open_ports = []
+                        detected_platform = 'unknown'
+                        
+                        for port, platform in platform_ports.items():
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(2)
+                            result = sock.connect_ex((ip, port))
+                            if result == 0:
+                                open_ports.append(port)
+                                if detected_platform == 'unknown':
+                                    detected_platform = platform
+                            sock.close()
+                        
+                        enhanced_device['open_ports'] = open_ports
+                        enhanced_device['platform'] = detected_platform
+                        
+                    except Exception as scan_error:
+                        logger.warning(f"Port scan failed for {ip}: {scan_error}")
+                        enhanced_device['platform'] = 'unknown'
+                        enhanced_device['open_ports'] = []
+                
+                enhanced_devices.append(enhanced_device)
+            
+            return {
+                'network_range': network_range,
+                'discovered_count': len(enhanced_devices),
+                'discovered': enhanced_devices
+            }
+        
+        return {
+            'network_range': network_range,
+            'discovered_count': 0,
+            'discovered': []
+        }
+        
+    except Exception as e:
+        logger.error(f"Network discovery failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Network discovery failed: {str(e)}")
+
+@app.post("/api/v1/platforms/{platform_type}/refresh")
+async def refresh_platform_vms(
+    platform_type: PlatformType,
+    db: Session = Depends(get_db)
+):
+    """Refresh VM list for a specific platform"""
+    try:
+        connector = connectors.get(platform_type)
+        if not connector:
+            raise HTTPException(status_code=400, detail=f"Platform {platform_type} not supported")
+        
+        if not connector.connected:
+            raise HTTPException(status_code=400, detail=f"Not connected to {platform_type}")
+        
+        vms = await connector.list_vms()
+        
+        # Update database with discovered VMs
+        for vm_data in vms:
+            existing_vm = db.query(VirtualMachine).filter(
+                VirtualMachine.vm_id == vm_data['vm_id'],
+                VirtualMachine.platform == platform_type
+            ).first()
+            
+            if existing_vm:
+                # Update existing VM
+                existing_vm.name = vm_data['name']
+                existing_vm.host = vm_data['host']
+                existing_vm.cpu_count = vm_data['cpu_count']
+                existing_vm.memory_mb = vm_data['memory_mb']
+                existing_vm.disk_size_gb = vm_data['disk_size_gb']
+                existing_vm.operating_system = vm_data['operating_system']
+                existing_vm.power_state = vm_data['power_state']
+                existing_vm.updated_at = datetime.now()
+            else:
+                # Create new VM record
+                new_vm = VirtualMachine(
+                    vm_id=vm_data['vm_id'],
+                    name=vm_data['name'],
+                    platform=platform_type,
+                    host=vm_data['host'],
+                    cpu_count=vm_data['cpu_count'],
+                    memory_mb=vm_data['memory_mb'],
+                    disk_size_gb=vm_data['disk_size_gb'],
+                    operating_system=vm_data['operating_system'],
+                    power_state=vm_data['power_state']
+                )
+                db.add(new_vm)
+        
+        db.commit()
+        
+        return {
+            'platform': platform_type.value,
+            'vms_discovered': len(vms),
+            'vms': vms
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to refresh VMs for {platform_type}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/vms/manual")
+async def add_vm_manually(
+    vm_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Add VM manually with user-provided information"""
+    try:
+        # Create VM record in database
+        db_vm = VirtualMachine(
+            vm_id=vm_data.get('vm_id', f"manual-{vm_data.get('ip_address', 'unknown')}"),
+            name=vm_data.get('name'),
+            platform=PlatformType(vm_data.get('platform')),
+            host=vm_data.get('ip_address'),
+            cpu_count=vm_data.get('cpu_count', 2),
+            memory_mb=vm_data.get('memory_mb', 4096),
+            disk_size_gb=vm_data.get('disk_size_gb', 50),
+            operating_system=vm_data.get('operating_system', 'Unknown'),
+            power_state='unknown',
+            vm_metadata={'manually_added': True, 'notes': vm_data.get('notes', '')}
+        )
+        
+        db.add(db_vm)
+        db.commit()
+        db.refresh(db_vm)
+        
+        return {
+            'id': db_vm.id,
+            'vm_id': db_vm.vm_id,
+            'name': db_vm.name,
+            'platform': db_vm.platform.value,
+            'host': db_vm.host,
+            'ip_address': db_vm.host,
+            'cpu_count': db_vm.cpu_count,
+            'memory_mb': db_vm.memory_mb,
+            'disk_size_gb': db_vm.disk_size_gb,
+            'operating_system': db_vm.operating_system,
+            'power_state': db_vm.power_state,
+            'created_at': db_vm.created_at.isoformat()
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to add VM manually: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add VM: {str(e)}")
+
+@app.post("/api/v1/discovery/network")
+async def discover_network_range(
+    discovery_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Discover devices on network range"""
+    try:
+        network_range = discovery_data.get('network_range', '192.168.1.0/24')
+        logger.info(f"Discovering devices in network range: {network_range}")
+        
+        # Use Ubuntu network discovery as it's the most generic
+        ubuntu_connector = connectors.get('ubuntu')
+        if ubuntu_connector:
+            discovered = await ubuntu_connector.discover_ubuntu_machines(network_range)
+            
+            # Enhanced discovery - try to detect platform types
+            enhanced_devices = []
+            for device in discovered:
+                enhanced_device = device.copy()
+                
+                # Try to detect platform based on open ports and services
+                ip = device.get('ip')
+                if ip:
+                    try:
+                        import socket
+                        
+                        # Check for common virtualization platform ports
+                        platform_ports = {
+                            443: 'vmware',  # vCenter/ESXi HTTPS
+                            902: 'vmware',  # VMware Auth
+                            8006: 'proxmox',  # Proxmox Web UI
+                            80: 'xcpng',    # XCP-ng Web UI (also check for specific headers)
+                            22: 'ubuntu'    # SSH (Ubuntu/Linux)
+                        }
+                        
+                        open_ports = []
+                        detected_platform = 'unknown'
+                        
+                        for port, platform in platform_ports.items():
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(2)
+                            result = sock.connect_ex((ip, port))
+                            if result == 0:
+                                open_ports.append(port)
+                                if detected_platform == 'unknown':
+                                    detected_platform = platform
+                            sock.close()
+                        
+                        enhanced_device['open_ports'] = open_ports
+                        enhanced_device['platform'] = detected_platform
+                        
+                    except Exception as scan_error:
+                        logger.warning(f"Port scan failed for {ip}: {scan_error}")
+                        enhanced_device['platform'] = 'unknown'
+                        enhanced_device['open_ports'] = []
+                
+                enhanced_devices.append(enhanced_device)
+            
+            return {
+                'network_range': network_range,
+                'discovered_count': len(enhanced_devices),
+                'discovered': enhanced_devices
+            }
+        
+        return {
+            'network_range': network_range,
+            'discovered_count': 0,
+            'discovered': []
+        }
+        
+    except Exception as e:
+        logger.error(f"Network discovery failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Network discovery failed: {str(e)}")
+
+@app.post("/api/v1/platforms/{platform_type}/refresh")
+async def refresh_platform_vms(
+    platform_type: PlatformType,
+    db: Session = Depends(get_db)
+):
+    """Refresh VM list for a specific platform"""
+    try:
+        connector = connectors.get(platform_type)
+        if not connector:
+            raise HTTPException(status_code=400, detail=f"Platform {platform_type} not supported")
+        
+        if not connector.connected:
+            raise HTTPException(status_code=400, detail=f"Not connected to {platform_type}")
+        
+        vms = await connector.list_vms()
+        
+        # Update database with discovered VMs
+        for vm_data in vms:
+            existing_vm = db.query(VirtualMachine).filter(
+                VirtualMachine.vm_id == vm_data['vm_id'],
+                VirtualMachine.platform == platform_type
+            ).first()
+            
+            if existing_vm:
+                # Update existing VM
+                existing_vm.name = vm_data['name']
+                existing_vm.host = vm_data['host']
+                existing_vm.cpu_count = vm_data['cpu_count']
+                existing_vm.memory_mb = vm_data['memory_mb']
+                existing_vm.disk_size_gb = vm_data['disk_size_gb']
+                existing_vm.operating_system = vm_data['operating_system']
+                existing_vm.power_state = vm_data['power_state']
+                existing_vm.updated_at = datetime.now()
+            else:
+                # Create new VM record
+                new_vm = VirtualMachine(
+                    vm_id=vm_data['vm_id'],
+                    name=vm_data['name'],
+                    platform=platform_type,
+                    host=vm_data['host'],
+                    cpu_count=vm_data['cpu_count'],
+                    memory_mb=vm_data['memory_mb'],
+                    disk_size_gb=vm_data['disk_size_gb'],
+                    operating_system=vm_data['operating_system'],
+                    power_state=vm_data['power_state']
+                )
+                db.add(new_vm)
+        
+        db.commit()
+        
+        return {
+            'platform': platform_type.value,
+            'vms_discovered': len(vms),
+            'vms': vms
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to refresh VMs for {platform_type}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/v1/backup-jobs")
 async def list_backup_jobs(
     skip: int = 0,
