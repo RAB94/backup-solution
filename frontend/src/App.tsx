@@ -3,21 +3,15 @@ import {
   Server, 
   HardDrive, 
   Shield, 
-  Activity, 
   Database,
   Cloud,
   RefreshCw,
   Play,
-  Pause,
   Trash2,
   Download,
-  Upload,
   Settings,
-  AlertTriangle,
   CheckCircle,
-  Clock,
   Plus,
-  BarChart3,
   Monitor,
   Cpu,
   MemoryStick,
@@ -27,10 +21,10 @@ import {
   LogIn,
   LogOut,
   UserPlus,
-  Users,
-  Lock,
   Wifi,
-  Search
+  Search,
+  AlertCircle,
+  X
 } from 'lucide-react';
 
 // Types
@@ -92,10 +86,30 @@ interface DashboardStats {
   success_rate: string;
 }
 
+interface PlatformStatus {
+  vmware: boolean;
+  proxmox: boolean;
+  xcpng: boolean;
+  ubuntu: boolean;
+}
+
 // API Service
 class APIService {
-  private baseURL = 'http://localhost:8000/api/v1';
+  private baseURL: string;
   private authToken: string | null = null;
+
+  constructor() {
+    // Determine API URL based on current host
+    const currentHost = window.location.hostname;
+    if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
+      this.baseURL = 'http://localhost:8000/api/v1';
+    } else {
+      // Use the same IP as the frontend but port 8000 for API
+      this.baseURL = `http://${currentHost}:8000/api/v1`;
+    }
+    
+    console.log('API Base URL:', this.baseURL);
+  }
 
   setAuthToken(token: string | null) {
     this.authToken = token;
@@ -111,17 +125,37 @@ class APIService {
       headers['Authorization'] = `Bearer ${this.authToken}`;
     }
 
-    const response = await fetch(`${this.baseURL}${endpoint}`, {
-      headers,
-      ...options,
-    });
+    console.log(`Making API request to: ${this.baseURL}${endpoint}`);
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-      throw new Error(errorData.detail || `API Error: ${response.statusText}`);
+    try {
+      const response = await fetch(`${this.baseURL}${endpoint}`, {
+        headers,
+        ...options,
+      });
+
+      console.log(`API Response status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('API Error response:', errorText);
+        
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { detail: errorText || 'Unknown error' };
+        }
+        
+        throw new Error(errorData.detail || `API Error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('API Response data:', data);
+      return data;
+    } catch (error) {
+      console.error('API Request failed:', error);
+      throw error;
     }
-
-    return response.json();
   }
 
   async login(username: string, password: string) {
@@ -255,8 +289,10 @@ const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   };
 
   const register = async (userData: any): Promise<boolean> => {
+    console.log('Starting registration process:', userData);
     try {
-      await api.register(userData);
+      const response = await api.register(userData);
+      console.log('Registration successful:', response);
       return true;
     } catch (error) {
       console.error('Registration failed:', error);
@@ -294,35 +330,33 @@ const useAuth = () => {
 };
 
 // Components
-const FuturisticCard: React.FC<{
+const Card: React.FC<{
   children: React.ReactNode;
   className?: string;
-  glowColor?: string;
-}> = ({ children, className = '', glowColor = 'cyan' }) => (
+}> = ({ children, className = '' }) => (
   <div className={`
-    bg-gray-900 bg-opacity-80 border border-cyan-500 border-opacity-30 
-    rounded-lg backdrop-blur-sm relative overflow-hidden
-    before:absolute before:inset-0 before:bg-gradient-to-r before:from-transparent before:via-cyan-500 before:via-opacity-5 before:to-transparent
-    hover:border-opacity-60 transition-all duration-300
+    bg-slate-800 border border-slate-700 rounded-lg shadow-lg
+    hover:border-slate-600 transition-all duration-200
     ${className}
   `}>
-    <div className="relative z-10 p-6">
+    <div className="p-6">
       {children}
     </div>
   </div>
 );
 
-const GlowButton: React.FC<{
+const Button: React.FC<{
   children: React.ReactNode;
   onClick?: () => void;
-  variant?: 'primary' | 'secondary' | 'danger';
+  variant?: 'primary' | 'secondary' | 'danger' | 'success';
   size?: 'sm' | 'md' | 'lg';
   disabled?: boolean;
 }> = ({ children, onClick, variant = 'primary', size = 'md', disabled = false }) => {
   const variants = {
-    primary: 'bg-cyan-600 hover:bg-cyan-500 border-cyan-400 text-white shadow-cyan-500/50',
-    secondary: 'bg-gray-700 hover:bg-gray-600 border-gray-500 text-cyan-100 shadow-gray-500/30',
-    danger: 'bg-red-600 hover:bg-red-500 border-red-400 text-white shadow-red-500/50'
+    primary: 'bg-blue-600 hover:bg-blue-500 text-white border-blue-600',
+    secondary: 'bg-slate-600 hover:bg-slate-500 text-white border-slate-600',
+    danger: 'bg-red-600 hover:bg-red-500 text-white border-red-600',
+    success: 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-600'
   };
 
   const sizes = {
@@ -338,8 +372,9 @@ const GlowButton: React.FC<{
       className={`
         ${variants[variant]} ${sizes[size]}
         border rounded-md font-medium transition-all duration-200
-        hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed
-        focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-opacity-50
+        hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed
+        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50
+        flex items-center justify-center
       `}
     >
       {children}
@@ -347,30 +382,30 @@ const GlowButton: React.FC<{
   );
 };
 
-const MetricDisplay: React.FC<{
+const MetricCard: React.FC<{
   title: string;
   value: string;
   icon: React.ReactNode;
   trend?: string;
   trendDirection?: 'up' | 'down' | 'stable';
 }> = ({ title, value, icon, trend, trendDirection }) => (
-  <FuturisticCard className="text-center">
+  <Card className="text-center">
     <div className="flex flex-col items-center space-y-3">
-      <div className="text-cyan-400 text-3xl">{icon}</div>
+      <div className="text-blue-400 text-3xl">{icon}</div>
       <div>
-        <p className="text-gray-400 text-sm uppercase tracking-wider">{title}</p>
+        <p className="text-slate-400 text-sm uppercase tracking-wider">{title}</p>
         <p className="text-white text-2xl font-bold font-mono">{value}</p>
         {trend && (
           <p className={`text-sm mt-1 ${
-            trendDirection === 'up' ? 'text-green-400' : 
-            trendDirection === 'down' ? 'text-red-400' : 'text-gray-400'
+            trendDirection === 'up' ? 'text-emerald-400' : 
+            trendDirection === 'down' ? 'text-red-400' : 'text-slate-400'
           }`}>
             {trendDirection === 'up' ? '↗' : trendDirection === 'down' ? '↘' : '→'} {trend}
           </p>
         )}
       </div>
     </div>
-  </FuturisticCard>
+  </Card>
 );
 
 const StatusIndicator: React.FC<{
@@ -382,9 +417,9 @@ const StatusIndicator: React.FC<{
       case 'completed':
       case 'poweredon':
       case 'running':
-        return { color: 'text-green-400', bg: 'bg-green-400', label: 'ONLINE' };
+        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'ONLINE' };
       case 'in progress':
-        return { color: 'text-cyan-400', bg: 'bg-cyan-400', label: 'ACTIVE' };
+        return { color: 'text-amber-400', bg: 'bg-amber-400', label: 'ACTIVE' };
       case 'failed':
       case 'error':
         return { color: 'text-red-400', bg: 'bg-red-400', label: 'ERROR' };
@@ -393,9 +428,9 @@ const StatusIndicator: React.FC<{
         return { color: 'text-yellow-400', bg: 'bg-yellow-400', label: 'PENDING' };
       case 'paused':
       case 'stopped':
-        return { color: 'text-gray-400', bg: 'bg-gray-400', label: 'OFFLINE' };
+        return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'OFFLINE' };
       default:
-        return { color: 'text-gray-400', bg: 'bg-gray-400', label: 'UNKNOWN' };
+        return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'UNKNOWN' };
     }
   };
 
@@ -413,6 +448,56 @@ const StatusIndicator: React.FC<{
   );
 };
 
+const Modal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+}> = ({ isOpen, onClose, title, children }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-slate-800 border border-slate-700 rounded-lg w-96 max-w-full mx-4">
+        <div className="flex items-center justify-between p-4 border-b border-slate-700">
+          <h2 className="text-lg font-semibold text-white">{title}</h2>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white transition-colors"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-6">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ConfirmationModal: React.FC<{
+  isOpen: boolean;
+  title: string;
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}> = ({ isOpen, title, message, onConfirm, onCancel }) => (
+  <Modal isOpen={isOpen} onClose={onCancel} title={title}>
+    <div className="space-y-4">
+      <p className="text-slate-300">{message}</p>
+      <div className="flex justify-end space-x-3">
+        <Button onClick={onCancel} variant="secondary">
+          Cancel
+        </Button>
+        <Button onClick={onConfirm} variant="danger">
+          Confirm
+        </Button>
+      </div>
+    </div>
+  </Modal>
+);
+
 const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -421,86 +506,84 @@ const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { login } = useAuth();
 
   const handleSubmit = async () => {
+    console.log('Login form submitted:', { username, password: '***' });
     setLoading(true);
     setError('');
     
+    if (!username || !password) {
+      setError('Please enter both username and password');
+      setLoading(false);
+      return;
+    }
+    
     try {
+      console.log('Calling login API...');
       const success = await login(username, password);
+      console.log('Login API result:', success);
+      
       if (success) {
+        console.log('Login successful, closing modal');
         onClose();
       } else {
         setError('Invalid credentials');
       }
-    } catch (err) {
-      setError('Login failed. Please try again.');
+    } catch (err: any) {
+      console.error('Login error:', err);
+      setError('Login failed. Please check your connection and try again.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
-      <FuturisticCard className="w-96 max-w-full mx-4">
-        <div className="space-y-6">
-          <div className="text-center">
-            <div className="flex justify-center mb-4">
-              <Shield className="text-cyan-400" size={48} />
-            </div>
-            <h2 className="text-xl font-semibold text-white uppercase tracking-wider">
-              ACCESS TERMINAL
-            </h2>
-            <p className="text-gray-400 text-sm mt-2">Enter your credentials</p>
+    <Modal isOpen={true} onClose={onClose} title="Login">
+      <div className="space-y-4">
+        {error && (
+          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
+            {error}
           </div>
+        )}
 
-          {error && (
-            <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-              {error}
-            </div>
-          )}
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Username
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="Enter username"
-                disabled={loading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Password
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="Enter password"
-                disabled={loading}
-                onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
-              />
-            </div>
-          </div>
-
-          <div className="flex justify-end space-x-3">
-            <GlowButton onClick={onClose} variant="secondary" disabled={loading}>
-              Cancel
-            </GlowButton>
-            <GlowButton onClick={handleSubmit} variant="primary" disabled={loading}>
-              {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
-              {loading ? 'Accessing...' : 'Login'}
-            </GlowButton>
-          </div>
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">
+            Username
+          </label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter username"
+            disabled={loading}
+          />
         </div>
-      </FuturisticCard>
-    </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">
+            Password
+          </label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter password"
+            disabled={loading}
+            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
+          />
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary" disabled={loading}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
+            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
+            {loading ? 'Logging in...' : 'Login'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 };
 
@@ -518,6 +601,7 @@ const RegisterForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { register } = useAuth();
 
   const handleSubmit = async () => {
+    console.log('Registration form submitted:', formData);
     setLoading(true);
     setError('');
     
@@ -527,123 +611,111 @@ const RegisterForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       return;
     }
 
+    if (!formData.username || !formData.email || !formData.full_name || !formData.password) {
+      setError('Please fill in all required fields');
+      setLoading(false);
+      return;
+    }
+
     try {
+      console.log('Calling register API...');
       const success = await register(formData);
+      console.log('Register API result:', success);
+      
       if (success) {
         alert('Registration successful! Please login.');
         onClose();
+      } else {
+        setError('Registration failed. Please try again.');
       }
     } catch (err: any) {
-      setError(err.message || 'Registration failed');
+      console.error('Registration error:', err);
+      setError(err.message || 'Registration failed. Please check your connection.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
-      <FuturisticCard className="w-96 max-w-full mx-4">
-        <div className="space-y-6">
-          <div className="text-center">
-            <div className="flex justify-center mb-4">
-              <UserPlus className="text-cyan-400" size={48} />
-            </div>
-            <h2 className="text-xl font-semibold text-white uppercase tracking-wider">
-              CREATE ACCOUNT
-            </h2>
-            <p className="text-gray-400 text-sm mt-2">Register new user</p>
+    <Modal isOpen={true} onClose={onClose} title="Register">
+      <div className="space-y-4 max-h-80 overflow-y-auto">
+        {error && (
+          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
+            {error}
           </div>
+        )}
 
-          {error && (
-            <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-              {error}
-            </div>
-          )}
-
-          <div className="space-y-4 max-h-80 overflow-y-auto">
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Username
-              </label>
-              <input
-                type="text"
-                value={formData.username}
-                onChange={(e) => setFormData({...formData, username: e.target.value})}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="Choose username"
-                disabled={loading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Email
-              </label>
-              <input
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({...formData, email: e.target.value})}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="email@company.com"
-                disabled={loading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Full Name
-              </label>
-              <input
-                type="text"
-                value={formData.full_name}
-                onChange={(e) => setFormData({...formData, full_name: e.target.value})}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="John Doe"
-                disabled={loading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Password
-              </label>
-              <input
-                type="password"
-                value={formData.password}
-                onChange={(e) => setFormData({...formData, password: e.target.value})}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="Enter password"
-                disabled={loading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Confirm Password
-              </label>
-              <input
-                type="password"
-                value={formData.confirm_password}
-                onChange={(e) => setFormData({...formData, confirm_password: e.target.value})}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="Confirm password"
-                disabled={loading}
-              />
-            </div>
-          </div>
-
-          <div className="flex justify-end space-x-3">
-            <GlowButton onClick={onClose} variant="secondary" disabled={loading}>
-              Cancel
-            </GlowButton>
-            <GlowButton onClick={handleSubmit} variant="primary" disabled={loading}>
-              {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <UserPlus size={16} className="mr-2" />}
-              {loading ? 'Creating...' : 'Register'}
-            </GlowButton>
-          </div>
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+          <input
+            type="text"
+            value={formData.username}
+            onChange={(e) => setFormData({...formData, username: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Choose username"
+            disabled={loading}
+          />
         </div>
-      </FuturisticCard>
-    </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Email</label>
+          <input
+            type="email"
+            value={formData.email}
+            onChange={(e) => setFormData({...formData, email: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="email@company.com"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Full Name</label>
+          <input
+            type="text"
+            value={formData.full_name}
+            onChange={(e) => setFormData({...formData, full_name: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="John Doe"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+          <input
+            type="password"
+            value={formData.password}
+            onChange={(e) => setFormData({...formData, password: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter password"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Confirm Password</label>
+          <input
+            type="password"
+            value={formData.confirm_password}
+            onChange={(e) => setFormData({...formData, confirm_password: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Confirm password"
+            disabled={loading}
+          />
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary" disabled={loading}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
+            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <UserPlus size={16} className="mr-2" />}
+            {loading ? 'Creating...' : 'Register'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 };
 
@@ -654,30 +726,30 @@ const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 flex items-center justify-center">
-        <FuturisticCard className="text-center">
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <Card className="text-center w-96">
           <div className="space-y-6">
             <div className="flex justify-center">
-              <Shield className="text-cyan-400" size={64} />
+              <Shield className="text-blue-400" size={64} />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-white uppercase tracking-wider">
-                VM BACKUP SOLUTION
+              <h1 className="text-2xl font-bold text-white">
+                VM Backup Solution
               </h1>
-              <p className="text-cyan-400 text-sm mt-2">SECURE ACCESS REQUIRED</p>
+              <p className="text-slate-400 text-sm mt-2">Please login to continue</p>
             </div>
             <div className="flex space-x-3 justify-center">
-              <GlowButton onClick={() => setShowLogin(true)} variant="primary">
+              <Button onClick={() => setShowLogin(true)} variant="primary">
                 <LogIn size={16} className="mr-2" />
                 Login
-              </GlowButton>
-              <GlowButton onClick={() => setShowRegister(true)} variant="secondary">
+              </Button>
+              <Button onClick={() => setShowRegister(true)} variant="secondary">
                 <UserPlus size={16} className="mr-2" />
                 Register
-              </GlowButton>
+              </Button>
             </div>
           </div>
-        </FuturisticCard>
+        </Card>
 
         {showLogin && <LoginForm onClose={() => setShowLogin(false)} />}
         {showRegister && <RegisterForm onClose={() => setShowRegister(false)} />}
@@ -686,6 +758,73 @@ const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   }
 
   return <>{children}</>;
+};
+
+const AddVMModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  availableVMs: VM[];
+  onAddVM: (vm: VM) => void;
+}> = ({ isOpen, onClose, availableVMs, onAddVM }) => {
+  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Add Virtual Machine">
+      <div className="space-y-4">
+        <p className="text-slate-300 text-sm">
+          Select a virtual machine from connected platforms to add to backup monitoring:
+        </p>
+        
+        {availableVMs.length === 0 ? (
+          <div className="text-center py-8">
+            <AlertCircle className="text-amber-400 mx-auto mb-2" size={32} />
+            <p className="text-slate-300">No VMs available</p>
+            <p className="text-slate-400 text-sm">Connect to platforms first to discover VMs</p>
+          </div>
+        ) : (
+          <div className="max-h-60 overflow-y-auto space-y-2">
+            {availableVMs.map((vm) => (
+              <div
+                key={`${vm.platform}-${vm.vm_id}`}
+                className={`p-3 border rounded cursor-pointer transition-colors ${
+                  selectedVM?.vm_id === vm.vm_id
+                    ? 'border-blue-500 bg-blue-500 bg-opacity-10'
+                    : 'border-slate-600 hover:border-slate-500'
+                }`}
+                onClick={() => setSelectedVM(vm)}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-white font-medium">{vm.name}</p>
+                    <p className="text-slate-400 text-sm">{vm.vm_id} • {vm.platform}</p>
+                  </div>
+                  <StatusIndicator status={vm.power_state} showLabel={false} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              if (selectedVM) {
+                onAddVM(selectedVM);
+                onClose();
+              }
+            }}
+            variant="primary"
+            disabled={!selectedVM}
+          >
+            Add VM
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
 };
 
 const UbuntuDiscovery: React.FC<{
@@ -709,24 +848,22 @@ const UbuntuDiscovery: React.FC<{
   };
 
   return (
-    <FuturisticCard>
-      <div className="space-y-6">
-        <h3 className="text-cyan-400 font-mono uppercase tracking-wider text-lg">
-          UBUNTU NETWORK DISCOVERY
-        </h3>
+    <Card>
+      <div className="space-y-4">
+        <h3 className="text-white text-lg font-medium">Ubuntu Network Discovery</h3>
 
         <div className="flex space-x-3">
           <input
             type="text"
             value={networkRange}
             onChange={(e) => setNetworkRange(e.target.value)}
-            className="flex-1 px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
+            className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
             placeholder="192.168.1.0/24"
           />
-          <GlowButton onClick={handleScan} disabled={isScanning} variant="primary">
+          <Button onClick={handleScan} disabled={isScanning} variant="primary">
             {isScanning ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <Search size={16} className="mr-2" />}
             {isScanning ? 'Scanning...' : 'Scan Network'}
-          </GlowButton>
+          </Button>
         </div>
 
         {discoveredMachines.length > 0 && (
@@ -734,26 +871,26 @@ const UbuntuDiscovery: React.FC<{
             <h4 className="text-white font-medium">Discovered Machines:</h4>
             <div className="space-y-2 max-h-60 overflow-y-auto">
               {discoveredMachines.map((machine, index) => (
-                <div key={index} className="flex items-center justify-between p-3 bg-gray-800 bg-opacity-50 rounded border border-cyan-500 border-opacity-20">
+                <div key={index} className="flex items-center justify-between p-3 bg-slate-700 rounded border border-slate-600">
                   <div>
                     <div className="text-white font-medium">{machine.hostname}</div>
-                    <div className="text-gray-400 text-sm">{machine.ip} - {machine.os_type}</div>
+                    <div className="text-slate-400 text-sm">{machine.ip} - {machine.os_type}</div>
                   </div>
-                  <GlowButton 
+                  <Button 
                     onClick={() => onMachineConnect(machine)} 
                     size="sm" 
                     variant="primary"
                   >
                     <Wifi size={14} className="mr-1" />
                     Connect
-                  </GlowButton>
+                  </Button>
                 </div>
               ))}
             </div>
           </div>
         )}
       </div>
-    </FuturisticCard>
+    </Card>
   );
 };
 
@@ -777,86 +914,62 @@ const UbuntuConnectionModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
-      <FuturisticCard className="w-96 max-w-full mx-4">
-        <div className="space-y-6">
-          <div className="text-center">
-            <div className="flex justify-center mb-4">
-              <Monitor className="text-cyan-400" size={32} />
-            </div>
-            <h2 className="text-xl font-semibold text-white uppercase tracking-wider">
-              Connect Ubuntu Machine
-            </h2>
-            <p className="text-gray-400 text-sm mt-2">{machine?.hostname} ({machine?.ip})</p>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                Username
-              </label>
-              <input
-                type="text"
-                value={connectionData.username}
-                onChange={(e) => setConnectionData({...connectionData, username: e.target.value})}
-                className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                placeholder="ubuntu"
-              />
-            </div>
-
-            <div className="flex items-center space-x-3">
-              <input
-                type="checkbox"
-                checked={connectionData.use_key}
-                onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
-                className="w-4 h-4 text-cyan-600 bg-gray-800 border-gray-600 rounded focus:ring-cyan-500"
-              />
-              <label className="text-cyan-400 text-sm font-mono uppercase tracking-wider">
-                Use SSH Key
-              </label>
-            </div>
-
-            {connectionData.use_key ? (
-              <div>
-                <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                  SSH Key Path
-                </label>
-                <input
-                  type="text"
-                  value={connectionData.ssh_key_path}
-                  onChange={(e) => setConnectionData({...connectionData, ssh_key_path: e.target.value})}
-                  className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                  placeholder="/path/to/private/key"
-                />
-              </div>
-            ) : (
-              <div>
-                <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={connectionData.password}
-                  onChange={(e) => setConnectionData({...connectionData, password: e.target.value})}
-                  className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                  placeholder="Enter password"
-                />
-              </div>
-            )}
-          </div>
-
-          <div className="flex justify-end space-x-3">
-            <GlowButton onClick={onClose} variant="secondary">
-              Cancel
-            </GlowButton>
-            <GlowButton onClick={handleConnect} variant="primary">
-              <Zap size={16} className="mr-2" />
-              Connect
-            </GlowButton>
-          </div>
+    <Modal isOpen={true} onClose={onClose} title={`Connect to ${machine?.hostname}`}>
+      <div className="space-y-4">
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+          <input
+            type="text"
+            value={connectionData.username}
+            onChange={(e) => setConnectionData({...connectionData, username: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="ubuntu"
+          />
         </div>
-      </FuturisticCard>
-    </div>
+
+        <div className="flex items-center space-x-3">
+          <input
+            type="checkbox"
+            checked={connectionData.use_key}
+            onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
+            className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+          />
+          <label className="text-slate-300 text-sm">Use SSH Key</label>
+        </div>
+
+        {connectionData.use_key ? (
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">SSH Key Path</label>
+            <input
+              type="text"
+              value={connectionData.ssh_key_path}
+              onChange={(e) => setConnectionData({...connectionData, ssh_key_path: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="/path/to/private/key"
+            />
+          </div>
+        ) : (
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+            <input
+              type="password"
+              value={connectionData.password}
+              onChange={(e) => setConnectionData({...connectionData, password: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="Enter password"
+            />
+          </div>
+        )}
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">Cancel</Button>
+          <Button onClick={handleConnect} variant="primary">
+            <Zap size={16} className="mr-2" />
+            Connect
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 };
 
@@ -875,9 +988,9 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup
     switch (platform) {
       case 'vmware': return <Server className="text-blue-400" />;
       case 'proxmox': return <Database className="text-red-400" />;
-      case 'xcpng': return <Cloud className="text-green-400" />;
+      case 'xcpng': return <Cloud className="text-emerald-400" />;
       case 'ubuntu': return <Monitor className="text-orange-400" />;
-      default: return <Server className="text-gray-400" />;
+      default: return <Server className="text-slate-400" />;
     }
   };
 
@@ -892,14 +1005,14 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup
   };
 
   return (
-    <FuturisticCard className="hover:scale-105 transition-transform duration-200">
+    <Card className="hover:scale-105 transition-transform duration-200">
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
             {getPlatformIcon(vm.platform)}
             <div>
               <h3 className="text-white font-semibold">{vm.name}</h3>
-              <p className="text-gray-400 text-sm font-mono">{vm.vm_id}</p>
+              <p className="text-slate-400 text-sm font-mono">{vm.vm_id}</p>
             </div>
           </div>
           <StatusIndicator status={vm.power_state} showLabel={false} />
@@ -907,7 +1020,7 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup
 
         <div className="flex justify-between items-center">
           <span 
-            className="px-2 py-1 bg-gray-800 border border-opacity-30 rounded text-xs font-mono uppercase"
+            className="px-2 py-1 bg-slate-700 border border-opacity-30 rounded text-xs font-mono uppercase"
             style={{ 
               borderColor: getPlatformColor(vm.platform),
               color: getPlatformColor(vm.platform)
@@ -915,56 +1028,56 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void }> = ({ vm, onBackup
           >
             {vm.platform}
           </span>
-          <span className="text-gray-400 text-xs">
+          <span className="text-slate-400 text-xs">
             {vm.ip_address || vm.host}
           </span>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="flex items-center space-x-2">
-            <Cpu className="text-cyan-400" size={16} />
+            <Cpu className="text-blue-400" size={16} />
             <span className="text-white text-sm">{vm.cpu_count} cores</span>
           </div>
           <div className="flex items-center space-x-2">
-            <MemoryStick className="text-cyan-400" size={16} />
+            <MemoryStick className="text-blue-400" size={16} />
             <span className="text-white text-sm">{Math.round(vm.memory_mb / 1024)} GB</span>
           </div>
           <div className="flex items-center space-x-2">
-            <HardDrive className="text-cyan-400" size={16} />
+            <HardDrive className="text-blue-400" size={16} />
             <span className="text-white text-sm">{vm.disk_size_gb} GB</span>
           </div>
           <div className="flex items-center space-x-2">
-            <Monitor className="text-cyan-400" size={16} />
+            <Monitor className="text-blue-400" size={16} />
             <span className="text-white text-sm truncate">{vm.operating_system}</span>
           </div>
         </div>
 
         <div className="flex space-x-2">
-          <GlowButton 
+          <Button 
             onClick={() => onBackup(vm)} 
             size="sm"
-            variant="primary"
+            variant="success"
           >
             <Shield size={14} className="mr-1" />
             Backup
-          </GlowButton>
-          <GlowButton size="sm" variant="secondary">
+          </Button>
+          <Button size="sm" variant="secondary">
             <Eye size={14} className="mr-1" />
             Monitor
-          </GlowButton>
+          </Button>
           {vm.platform === 'ubuntu' && (
-            <GlowButton 
+            <Button 
               size="sm" 
               variant="secondary"
               onClick={() => handleInstallAgent(vm)}
             >
               <Download size={14} className="mr-1" />
               Agent
-            </GlowButton>
+            </Button>
           )}
         </div>
       </div>
-    </FuturisticCard>
+    </Card>
   );
 };
 
@@ -972,86 +1085,136 @@ const BackupJobTable: React.FC<{
   jobs: BackupJob[];
   onRun: (id: number) => void;
   onDelete: (id: number) => void;
-}> = ({ jobs, onRun, onDelete }) => (
-  <FuturisticCard>
-    <div className="overflow-x-auto">
-      <table className="w-full">
-        <thead>
-          <tr className="border-b border-cyan-500 border-opacity-30">
-            <th className="text-left py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">Job Name</th>
-            <th className="text-left py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">VM Target</th>
-            <th className="text-left py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">Type</th>
-            <th className="text-left py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">Status</th>
-            <th className="text-left py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">Last Run</th>
-            <th className="text-left py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">Next Run</th>
-            <th className="text-center py-3 text-cyan-400 font-mono uppercase tracking-wider text-sm">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {jobs.map((job, index) => (
-            <tr 
-              key={job.id} 
-              className={`border-b border-gray-700 border-opacity-50 hover:bg-cyan-500 hover:bg-opacity-5 transition-colors ${
-                index % 2 === 0 ? 'bg-gray-800 bg-opacity-30' : ''
-              }`}
-            >
-              <td className="py-4">
-                <div>
-                  <div className="text-white font-medium">{job.name}</div>
-                  <div className="text-gray-400 text-sm">{job.description}</div>
-                </div>
-              </td>
-              <td className="py-4">
-                <span className="text-cyan-300 font-mono">{job.vm_id}</span>
-              </td>
-              <td className="py-4">
-                <span className="px-2 py-1 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-cyan-400 text-xs font-mono uppercase">
-                  {job.backup_type}
-                </span>
-              </td>
-              <td className="py-4">
-                <StatusIndicator status={job.status} />
-              </td>
-              <td className="py-4">
-                <span className="text-gray-300 font-mono text-sm">
-                  {job.last_run ? new Date(job.last_run).toLocaleString() : 'Never'}
-                </span>
-              </td>
-              <td className="py-4">
-                <span className="text-gray-300 font-mono text-sm">
-                  {job.next_run ? new Date(job.next_run).toLocaleString() : 'Not scheduled'}
-                </span>
-              </td>
-              <td className="py-4">
-                <div className="flex justify-center space-x-2">
-                  <button
-                    onClick={() => onRun(job.id)}
-                    className="p-2 text-green-400 hover:bg-green-400 hover:bg-opacity-20 rounded transition-colors"
-                    title="Run Now"
-                  >
-                    <Play size={16} />
-                  </button>
-                  <button
-                    onClick={() => onDelete(job.id)}
-                    className="p-2 text-red-400 hover:bg-red-400 hover:bg-opacity-20 rounded transition-colors"
-                    title="Delete"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  </FuturisticCard>
-);
+}> = ({ jobs, onRun, onDelete }) => {
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [jobToDelete, setJobToDelete] = useState<number | null>(null);
+
+  const handleDeleteClick = (jobId: number) => {
+    setJobToDelete(jobId);
+    setShowConfirmDelete(true);
+  };
+
+  const handleConfirmDelete = () => {
+    if (jobToDelete) {
+      onDelete(jobToDelete);
+      setJobToDelete(null);
+    }
+    setShowConfirmDelete(false);
+  };
+
+  const handleCancelDelete = () => {
+    setJobToDelete(null);
+    setShowConfirmDelete(false);
+  };
+
+  if (jobs.length === 0) {
+    return (
+      <Card>
+        <div className="text-center py-12">
+          <Shield className="text-blue-400 mx-auto mb-4" size={48} />
+          <h3 className="text-white text-lg font-medium mb-2">No Backup Jobs</h3>
+          <p className="text-slate-400 mb-4">Create your first backup job to get started</p>
+          <Button variant="primary">
+            <Plus size={16} className="mr-2" />
+            Create Backup Job
+          </Button>
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <>
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-slate-700">
+                <th className="text-left py-3 text-slate-300 font-medium text-sm">Job Name</th>
+                <th className="text-left py-3 text-slate-300 font-medium text-sm">VM Target</th>
+                <th className="text-left py-3 text-slate-300 font-medium text-sm">Type</th>
+                <th className="text-left py-3 text-slate-300 font-medium text-sm">Status</th>
+                <th className="text-left py-3 text-slate-300 font-medium text-sm">Last Run</th>
+                <th className="text-left py-3 text-slate-300 font-medium text-sm">Next Run</th>
+                <th className="text-center py-3 text-slate-300 font-medium text-sm">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((job, index) => (
+                <tr 
+                  key={job.id} 
+                  className={`border-b border-slate-700 hover:bg-slate-700 hover:bg-opacity-50 transition-colors ${
+                    index % 2 === 0 ? 'bg-slate-800 bg-opacity-30' : ''
+                  }`}
+                >
+                  <td className="py-4">
+                    <div>
+                      <div className="text-white font-medium">{job.name}</div>
+                      <div className="text-slate-400 text-sm">{job.description}</div>
+                    </div>
+                  </td>
+                  <td className="py-4">
+                    <span className="text-blue-300 font-mono">{job.vm_id}</span>
+                  </td>
+                  <td className="py-4">
+                    <span className="px-2 py-1 bg-slate-700 border border-slate-600 rounded text-blue-400 text-xs font-mono uppercase">
+                      {job.backup_type}
+                    </span>
+                  </td>
+                  <td className="py-4">
+                    <StatusIndicator status={job.status} />
+                  </td>
+                  <td className="py-4">
+                    <span className="text-slate-300 font-mono text-sm">
+                      {job.last_run ? new Date(job.last_run).toLocaleString() : 'Never'}
+                    </span>
+                  </td>
+                  <td className="py-4">
+                    <span className="text-slate-300 font-mono text-sm">
+                      {job.next_run ? new Date(job.next_run).toLocaleString() : 'Not scheduled'}
+                    </span>
+                  </td>
+                  <td className="py-4">
+                    <div className="flex justify-center space-x-2">
+                      <button
+                        onClick={() => onRun(job.id)}
+                        className="p-2 text-emerald-400 hover:bg-emerald-400 hover:bg-opacity-20 rounded transition-colors"
+                        title="Run Now"
+                      >
+                        <Play size={16} />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteClick(job.id)}
+                        className="p-2 text-red-400 hover:bg-red-400 hover:bg-opacity-20 rounded transition-colors"
+                        title="Delete"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <ConfirmationModal
+        isOpen={showConfirmDelete}
+        title="Delete Backup Job"
+        message="Are you sure you want to delete this backup job? This action cannot be undone."
+        onConfirm={handleConfirmDelete}
+        onCancel={handleCancelDelete}
+      />
+    </>
+  );
+};
 
 const PlatformConnector: React.FC<{
   platform: string;
   onConnect: (platform: string, data: any) => void;
-}> = ({ platform, onConnect }) => {
+  isConnected: boolean;
+}> = ({ platform, onConnect, isConnected }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [connectionData, setConnectionData] = useState({
     host: '',
@@ -1066,7 +1229,7 @@ const PlatformConnector: React.FC<{
     switch (platform) {
       case 'vmware': return <Server className="text-blue-400" size={32} />;
       case 'proxmox': return <Database className="text-red-400" size={32} />;
-      case 'xcpng': return <Cloud className="text-green-400" size={32} />;
+      case 'xcpng': return <Cloud className="text-emerald-400" size={32} />;
       case 'ubuntu': return <Monitor className="text-orange-400" size={32} />;
       default: return <Server size={32} />;
     }
@@ -1084,140 +1247,124 @@ const PlatformConnector: React.FC<{
 
   return (
     <>
-      <FuturisticCard className="text-center hover:scale-105 transition-transform duration-200">
+      <Card className="text-center hover:scale-105 transition-transform duration-200 relative">
+        {isConnected && (
+          <div className="absolute top-3 right-3">
+            <div className="flex items-center space-x-1 bg-emerald-600 px-2 py-1 rounded text-white text-xs">
+              <CheckCircle size={12} />
+              <span>Connected</span>
+            </div>
+          </div>
+        )}
         <div className="space-y-4">
           <div className="flex justify-center">{getPlatformIcon()}</div>
           <div>
-            <h3 className="text-white font-semibold text-lg uppercase tracking-wider">{platform}</h3>
-            <p className="text-gray-400 text-sm">{getPlatformDescription()}</p>
+            <h3 className="text-white font-semibold text-lg capitalize">{platform}</h3>
+            <p className="text-slate-400 text-sm">{getPlatformDescription()}</p>
           </div>
-          <GlowButton onClick={() => setIsOpen(true)} variant="primary">
+          <Button 
+            onClick={() => setIsOpen(true)} 
+            variant={isConnected ? "secondary" : "primary"}
+          >
             <Zap size={16} className="mr-2" />
-            Connect
-          </GlowButton>
+            {isConnected ? 'Reconnect' : 'Connect'}
+          </Button>
         </div>
-      </FuturisticCard>
+      </Card>
 
-      {isOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
-          <FuturisticCard className="w-96 max-w-full mx-4">
-            <div className="space-y-6">
-              <div className="text-center">
-                <div className="flex justify-center mb-4">{getPlatformIcon()}</div>
-                <h2 className="text-xl font-semibold text-white uppercase tracking-wider">
-                  Connect to {platform}
-                </h2>
-                <p className="text-gray-400 text-sm mt-2">Enter connection credentials</p>
-              </div>
+      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title={`Connect to ${platform}`}>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">
+              {platform === 'ubuntu' ? 'IP Address' : 'Host Address'}
+            </label>
+            <input
+              type="text"
+              value={connectionData.host}
+              onChange={(e) => setConnectionData({...connectionData, host: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder={platform === 'ubuntu' ? '192.168.1.100' : 'your-server.domain.com'}
+            />
+          </div>
 
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                    {platform === 'ubuntu' ? 'IP Address' : 'Host Address'}
-                  </label>
-                  <input
-                    type="text"
-                    value={connectionData.host}
-                    onChange={(e) => setConnectionData({...connectionData, host: e.target.value})}
-                    className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                    placeholder={platform === 'ubuntu' ? '192.168.1.100' : 'your-server.domain.com'}
-                  />
-                </div>
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+            <input
+              type="text"
+              value={connectionData.username}
+              onChange={(e) => setConnectionData({...connectionData, username: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder={
+                platform === 'vmware' ? 'administrator@vsphere.local' :
+                platform === 'proxmox' ? 'root@pam' :
+                platform === 'ubuntu' ? 'ubuntu' : 'root'
+              }
+            />
+          </div>
 
-                <div>
-                  <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                    Username
-                  </label>
-                  <input
-                    type="text"
-                    value={connectionData.username}
-                    onChange={(e) => setConnectionData({...connectionData, username: e.target.value})}
-                    className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                    placeholder={
-                      platform === 'vmware' ? 'administrator@vsphere.local' :
-                      platform === 'proxmox' ? 'root@pam' :
-                      platform === 'ubuntu' ? 'ubuntu' : 'root'
-                    }
-                  />
-                </div>
-
-                {platform === 'ubuntu' && (
-                  <div className="flex items-center space-x-3">
-                    <input
-                      type="checkbox"
-                      checked={connectionData.use_key}
-                      onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
-                      className="w-4 h-4 text-cyan-600 bg-gray-800 border-gray-600 rounded focus:ring-cyan-500"
-                    />
-                    <label className="text-cyan-400 text-sm font-mono uppercase tracking-wider">
-                      Use SSH Key
-                    </label>
-                  </div>
-                )}
-
-                {platform === 'ubuntu' && connectionData.use_key ? (
-                  <div>
-                    <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                      SSH Key Path
-                    </label>
-                    <input
-                      type="text"
-                      value={connectionData.ssh_key_path}
-                      onChange={(e) => setConnectionData({...connectionData, ssh_key_path: e.target.value})}
-                      className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                      placeholder="/path/to/private/key"
-                    />
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      value={connectionData.password}
-                      onChange={(e) => setConnectionData({...connectionData, password: e.target.value})}
-                      className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                      placeholder="••••••••"
-                    />
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-cyan-400 text-sm font-mono uppercase tracking-wider mb-2">
-                    Port
-                  </label>
-                  <input
-                    type="number"
-                    value={connectionData.port}
-                    onChange={(e) => setConnectionData({...connectionData, port: parseInt(e.target.value)})}
-                    className="w-full px-4 py-2 bg-gray-800 border border-cyan-500 border-opacity-30 rounded text-white placeholder-gray-500 focus:border-cyan-400 focus:outline-none transition-colors"
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-3">
-                <GlowButton 
-                  onClick={() => setIsOpen(false)}
-                  variant="secondary"
-                >
-                  Cancel
-                </GlowButton>
-                <GlowButton 
-                  onClick={() => {
-                    onConnect(platform, connectionData);
-                    setIsOpen(false);
-                  }}
-                  variant="primary"
-                >
-                  <Zap size={16} className="mr-2" />
-                  Connect
-                </GlowButton>
-              </div>
+          {platform === 'ubuntu' && (
+            <div className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={connectionData.use_key}
+                onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
+                className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+              />
+              <label className="text-slate-300 text-sm">Use SSH Key</label>
             </div>
-          </FuturisticCard>
+          )}
+
+          {platform === 'ubuntu' && connectionData.use_key ? (
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">SSH Key Path</label>
+              <input
+                type="text"
+                value={connectionData.ssh_key_path}
+                onChange={(e) => setConnectionData({...connectionData, ssh_key_path: e.target.value})}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                placeholder="/path/to/private/key"
+              />
+            </div>
+          ) : (
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+              <input
+                type="password"
+                value={connectionData.password}
+                onChange={(e) => setConnectionData({...connectionData, password: e.target.value})}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                placeholder="••••••••"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Port</label>
+            <input
+              type="number"
+              value={connectionData.port}
+              onChange={(e) => setConnectionData({...connectionData, port: parseInt(e.target.value)})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            />
+          </div>
+
+          <div className="flex justify-end space-x-3">
+            <Button onClick={() => setIsOpen(false)} variant="secondary">
+              Cancel
+            </Button>
+            <Button 
+              onClick={() => {
+                onConnect(platform, connectionData);
+                setIsOpen(false);
+              }}
+              variant="primary"
+            >
+              <Zap size={16} className="mr-2" />
+              Connect
+            </Button>
+          </div>
         </div>
-      )}
+      </Modal>
     </>
   );
 };
@@ -1236,142 +1383,69 @@ const VMBackupDashboard: React.FC = () => {
   const [vms, setVMs] = useState<VM[]>([]);
   const [ubuntuMachines, setUbuntuMachines] = useState<VM[]>([]);
   const [backupJobs, setBackupJobs] = useState<BackupJob[]>([]);
-  const [loading, setLoading] = useState(false);
   const [selectedMachine, setSelectedMachine] = useState<any>(null);
   const [showUbuntuConnection, setShowUbuntuConnection] = useState(false);
+  const [showAddVM, setShowAddVM] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [platformStatus, setPlatformStatus] = useState<PlatformStatus>({
+    vmware: false,
+    proxmox: false,
+    xcpng: false,
+    ubuntu: false
+  });
 
   useEffect(() => {
     loadInitialData();
   }, []);
 
   const loadInitialData = async () => {
-    setStats({
-      total_backup_jobs: 12,
-      running_jobs: 2,
-      total_vms_protected: 45,
-      total_backups_size: '2.4 TB',
-      last_24h_jobs: 8,
-      success_rate: '99.2%'
-    });
+    setLoading(true);
+    try {
+      // Load real data from API
+      const [statsData, jobsData] = await Promise.all([
+        api.getStatistics().catch(() => ({
+          total_backup_jobs: 0,
+          running_jobs: 0,
+          total_vms_protected: 0,
+          total_backups_size: '0 GB',
+          last_24h_jobs: 0,
+          success_rate: '0%'
+        })),
+        api.getBackupJobs().catch(() => [])
+      ]);
 
-    setVMs([
-      {
-        id: 1,
-        vm_id: 'vm-001',
-        name: 'web-server-01',
-        platform: 'vmware',
-        host: 'esxi-host-01.local',
-        cpu_count: 4,
-        memory_mb: 8192,
-        disk_size_gb: 100,
-        operating_system: 'Ubuntu 20.04 LTS',
-        power_state: 'poweredOn',
-        created_at: '2024-01-15T10:30:00Z'
-      },
-      {
-        id: 2,
-        vm_id: '100',
-        name: 'mail-server',
-        platform: 'proxmox',
-        host: 'pve-node-01',
-        cpu_count: 2,
-        memory_mb: 4096,
-        disk_size_gb: 50,
-        operating_system: 'Debian 11',
-        power_state: 'running',
-        created_at: '2024-01-10T14:20:00Z'
-      },
-      {
-        id: 3,
-        vm_id: 'xen-vm-001',
-        name: 'dev-server',
-        platform: 'xcpng',
-        host: 'xcpng-host-01',
-        cpu_count: 2,
-        memory_mb: 4096,
-        disk_size_gb: 80,
-        operating_system: 'CentOS 8',
-        power_state: 'Running',
-        created_at: '2024-01-12T09:15:00Z'
-      }
-    ]);
+      setStats(statsData);
+      setBackupJobs(jobsData);
 
-    setUbuntuMachines([
-      {
-        id: 4,
-        vm_id: 'ubuntu-192.168.1.101',
-        name: 'laptop-dev-01',
-        platform: 'ubuntu',
-        host: '192.168.1.101',
-        cpu_count: 4,
-        memory_mb: 16384,
-        disk_size_gb: 512,
-        operating_system: 'Ubuntu 22.04.3 LTS',
-        power_state: 'running',
-        created_at: '2024-01-18T11:45:00Z',
-        ip_address: '192.168.1.101'
-      },
-      {
-        id: 5,
-        vm_id: 'ubuntu-192.168.1.102',
-        name: 'workstation-design',
-        platform: 'ubuntu',
-        host: '192.168.1.102',
-        cpu_count: 8,
-        memory_mb: 32768,
-        disk_size_gb: 1024,
-        operating_system: 'Ubuntu 23.04',
-        power_state: 'running',
-        created_at: '2024-01-19T14:20:00Z',
-        ip_address: '192.168.1.102'
-      }
-    ]);
+      // Load VMs from connected platforms - this will be empty initially
+      setVMs([]);
+      setUbuntuMachines([]);
+    } catch (error) {
+      console.error('Failed to load initial data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    setBackupJobs([
-      {
-        id: 1,
-        name: 'Daily Web Server Backup',
-        description: 'Automated daily backup of web server',
-        vm_id: 'vm-001',
-        platform: 'vmware',
-        backup_type: 'incremental',
-        schedule_cron: '0 2 * * *',
-        status: 'completed',
-        last_run: '2024-01-20T02:00:00Z',
-        next_run: '2024-01-21T02:00:00Z',
-        created_at: '2024-01-15T10:30:00Z'
-      },
-      {
-        id: 2,
-        name: 'Weekly Mail Server Backup',
-        description: 'Weekly full backup of mail server',
-        vm_id: '100',
-        platform: 'proxmox',
-        backup_type: 'full',
-        schedule_cron: '0 3 * * 0',
-        status: 'running',
-        last_run: '2024-01-14T03:00:00Z',
-        next_run: '2024-01-21T03:00:00Z',
-        created_at: '2024-01-10T14:20:00Z'
-      },
-      {
-        id: 3,
-        name: 'Ubuntu Laptop Sync',
-        description: 'Daily sync of development laptop',
-        vm_id: 'ubuntu-192.168.1.101',
-        platform: 'ubuntu',
-        backup_type: 'incremental',
-        schedule_cron: '0 1 * * *',
-        status: 'pending',
-        last_run: '2024-01-19T01:00:00Z',
-        next_run: '2024-01-21T01:00:00Z',
-        created_at: '2024-01-18T11:45:00Z'
+  const refreshVMsForPlatform = async (platform: string) => {
+    try {
+      const platformVMs = await api.getVMs(platform);
+      if (platform === 'ubuntu') {
+        // Replace instead of appending to avoid duplicates
+        setUbuntuMachines(platformVMs);
+      } else {
+        // Merge with existing VMs from other platforms, avoiding duplicates
+        setVMs(prev => {
+          const filtered = prev.filter(vm => vm.platform !== platform);
+          return [...filtered, ...platformVMs];
+        });
       }
-    ]);
+    } catch (error) {
+      console.error(`Failed to load VMs for ${platform}:`, error);
+    }
   };
 
   const handleConnectPlatform = async (platform: string, connectionData: any) => {
-    setLoading(true);
     try {
       if (platform === 'ubuntu') {
         await api.connectUbuntuMachine(connectionData);
@@ -1379,21 +1453,51 @@ const VMBackupDashboard: React.FC = () => {
         await api.connectPlatform(platform, connectionData);
       }
       
-      if (platform === 'ubuntu') {
-        const machines = await api.getVMs('ubuntu');
-        setUbuntuMachines(prev => [...prev, ...machines]);
-      } else {
-        const platformVMs = await api.getVMs(platform);
-        setVMs(prev => [...prev, ...platformVMs]);
-      }
+      // Update platform status
+      setPlatformStatus(prev => ({
+        ...prev,
+        [platform]: true
+      }));
       
       alert(`Successfully connected to ${platform}`);
+      
+      // Refresh VMs for this platform
+      await refreshVMsForPlatform(platform);
     } catch (error) {
       console.error('Failed to connect:', error);
-      alert(`Failed to connect to ${platform}`);
-    } finally {
-      setLoading(false);
+      alert(`Failed to connect to ${platform}: ${error}`);
     }
+  };
+
+  const handleScanNetworks = async () => {
+    try {
+      // Only scan platforms that are connected
+      const connectedPlatforms = Object.entries(platformStatus)
+        .filter(([_, connected]) => connected)
+        .map(([platform, _]) => platform);
+
+      if (connectedPlatforms.length === 0) {
+        alert('No platforms connected. Please connect to platforms first.');
+        return;
+      }
+
+      // Refresh all connected platforms
+      await Promise.all(
+        connectedPlatforms.map(platform => 
+          refreshVMsForPlatform(platform).catch(() => {})
+        )
+      );
+      
+      alert('Network scan completed');
+    } catch (error) {
+      console.error('Network scan failed:', error);
+      alert('Network scan failed');
+    }
+  };
+
+  const handleAddVM = (vm: VM) => {
+    // Add VM to monitoring (in real implementation, this would save to backend)
+    alert(`Added ${vm.name} to backup monitoring`);
   };
 
   const handleBackupVM = (vm: VM) => {
@@ -1418,15 +1522,13 @@ const VMBackupDashboard: React.FC = () => {
   };
 
   const handleDeleteBackupJob = async (jobId: number) => {
-    if (confirm('Are you sure you want to delete this backup job?')) {
-      try {
-        await api.deleteBackupJob(jobId);
-        setBackupJobs(prev => prev.filter(job => job.id !== jobId));
-        alert('Backup job deleted successfully');
-      } catch (error) {
-        console.error('Failed to delete backup job:', error);
-        alert('Failed to delete backup job');
-      }
+    try {
+      await api.deleteBackupJob(jobId);
+      setBackupJobs(prev => prev.filter(job => job.id !== jobId));
+      alert('Backup job deleted successfully');
+    } catch (error) {
+      console.error('Failed to delete backup job:', error);
+      alert('Failed to delete backup job');
     }
   };
 
@@ -1435,276 +1537,317 @@ const VMBackupDashboard: React.FC = () => {
     setShowUbuntuConnection(true);
   };
 
+  const getAllVMs = () => [...vms, ...ubuntuMachines];
+
   const tabs = [
-    { id: 'dashboard', label: 'COMMAND CENTER', icon: <Terminal size={20} /> },
-    { id: 'vms', label: 'VIRTUAL MACHINES', icon: <Server size={20} /> },
-    { id: 'ubuntu', label: 'UBUNTU MACHINES', icon: <Monitor size={20} /> },
-    { id: 'jobs', label: 'BACKUP OPERATIONS', icon: <Shield size={20} /> },
-    { id: 'platforms', label: 'PLATFORM CONTROL', icon: <Settings size={20} /> },
+    { id: 'dashboard', label: 'Dashboard', icon: <Terminal size={20} /> },
+    { id: 'vms', label: 'Virtual Machines', icon: <Server size={20} /> },
+    { id: 'ubuntu', label: 'Ubuntu Machines', icon: <Monitor size={20} /> },
+    { id: 'jobs', label: 'Backup Jobs', icon: <Shield size={20} /> },
+    { id: 'platforms', label: 'Platforms', icon: <Settings size={20} /> },
   ];
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <Card className="text-center">
+          <RefreshCw className="text-blue-400 animate-spin mx-auto mb-4" size={48} />
+          <h2 className="text-white text-xl">Loading...</h2>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-900">
+      <header className="border-b border-slate-700 bg-slate-800">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center h-16">
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-3">
+                <Shield className="text-blue-400" size={32} />
+                <div>
+                  <h1 className="text-xl font-bold text-white">VM Backup Solution</h1>
+                  <p className="text-slate-400 text-xs">Enterprise Protection System</p>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center space-x-6">
+              <div className="flex items-center space-x-3">
+                <StatusIndicator status="online" />
+                <span className="text-slate-400 text-sm">System Online</span>
+              </div>
+              <div className="text-slate-400 text-sm">
+                {new Date().toLocaleTimeString()}
+              </div>
+              {user && (
+                <div className="flex items-center space-x-3">
+                  <div className="text-right">
+                    <div className="text-white text-sm font-medium">{user.full_name}</div>
+                    <div className="text-slate-400 text-xs">{user.role}</div>
+                  </div>
+                  <Button onClick={logout} size="sm" variant="secondary">
+                    <LogOut size={16} />
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <nav className="bg-slate-800 border-b border-slate-700">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex space-x-8">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`flex items-center space-x-2 py-4 px-2 border-b-2 font-medium text-sm transition-all duration-200 ${
+                  activeTab === tab.id
+                    ? 'border-blue-400 text-blue-400'
+                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-500'
+                }`}
+              >
+                {tab.icon}
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </nav>
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {activeTab === 'dashboard' && (
+          <div className="space-y-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <MetricCard
+                title="Protected VMs"
+                value={stats.total_vms_protected.toString()}
+                icon={<Server />}
+              />
+              <MetricCard
+                title="Active Jobs"
+                value={stats.total_backup_jobs.toString()}
+                icon={<Shield />}
+              />
+              <MetricCard
+                title="Storage Used"
+                value={stats.total_backups_size}
+                icon={<HardDrive />}
+              />
+              <MetricCard
+                title="Success Rate"
+                value={stats.success_rate}
+                icon={<CheckCircle />}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">System Status</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Backup Engine</span>
+                    <StatusIndicator status="online" />
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Database Connection</span>
+                    <StatusIndicator status="online" />
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Scheduler Service</span>
+                    <StatusIndicator status="online" />
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">API Service</span>
+                    <StatusIndicator status="online" />
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">Recent Activity</h3>
+                <div className="space-y-3">
+                  {backupJobs.length === 0 ? (
+                    <div className="text-center py-8">
+                      <p className="text-slate-400">No recent activity</p>
+                      <p className="text-slate-500 text-sm">Create backup jobs to see activity here</p>
+                    </div>
+                  ) : (
+                    backupJobs.slice(0, 3).map((job) => (
+                      <div key={job.id} className="flex items-start space-x-3">
+                        <CheckCircle className="text-emerald-400 mt-1" size={16} />
+                        <div>
+                          <p className="text-white text-sm">{job.name}</p>
+                          <p className="text-slate-400 text-xs">
+                            {job.last_run ? new Date(job.last_run).toLocaleString() : 'Not run yet'}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'vms' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h2 className="text-2xl font-bold text-white">Virtual Machines</h2>
+              <div className="flex space-x-3">
+                <Button onClick={handleScanNetworks} variant="secondary">
+                  <RefreshCw size={16} className="mr-2" />
+                  Scan Networks
+                </Button>
+                <Button onClick={() => setShowAddVM(true)} variant="primary">
+                  <Plus size={16} className="mr-2" />
+                  Add VM
+                </Button>
+              </div>
+            </div>
+            
+            {vms.length === 0 ? (
+              <Card>
+                <div className="text-center py-12">
+                  <Server className="text-blue-400 mx-auto mb-4" size={48} />
+                  <h3 className="text-white text-lg font-medium mb-2">No Virtual Machines</h3>
+                  <p className="text-slate-400 mb-4">Connect to platforms to discover VMs</p>
+                  <Button variant="primary" onClick={() => setActiveTab('platforms')}>
+                    <Settings size={16} className="mr-2" />
+                    Connect Platforms
+                  </Button>
+                </div>
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {vms.map((vm) => (
+                  <VMCard key={`${vm.platform}-${vm.vm_id}`} vm={vm} onBackup={handleBackupVM} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'ubuntu' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h2 className="text-2xl font-bold text-white">Ubuntu Machines</h2>
+              <div className="flex space-x-3">
+                <Button variant="secondary">
+                  <RefreshCw size={16} className="mr-2" />
+                  Refresh
+                </Button>
+                <Button variant="primary">
+                  <Search size={16} className="mr-2" />
+                  Discover
+                </Button>
+              </div>
+            </div>
+
+            <UbuntuDiscovery onMachineConnect={handleUbuntuMachineConnect} />
+            
+            {ubuntuMachines.length === 0 ? (
+              <Card>
+                <div className="text-center py-12">
+                  <Monitor className="text-blue-400 mx-auto mb-4" size={48} />
+                  <h3 className="text-white text-lg font-medium mb-2">No Ubuntu Machines</h3>
+                  <p className="text-slate-400 mb-4">Use network discovery to find Ubuntu machines</p>
+                </div>
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {ubuntuMachines.map((machine) => (
+                  <VMCard key={`${machine.platform}-${machine.vm_id}`} vm={machine} onBackup={handleBackupVM} />
+                ))}
+              </div>
+            )}
+
+            {showUbuntuConnection && selectedMachine && (
+              <UbuntuConnectionModal
+                machine={selectedMachine}
+                onClose={() => setShowUbuntuConnection(false)}
+                onConnect={(connectionData) => handleConnectPlatform('ubuntu', connectionData)}
+              />
+            )}
+          </div>
+        )}
+
+        {activeTab === 'jobs' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h2 className="text-2xl font-bold text-white">Backup Jobs</h2>
+              <div className="flex space-x-3">
+                <Button variant="secondary" onClick={loadInitialData}>
+                  <RefreshCw size={16} className="mr-2" />
+                  Refresh
+                </Button>
+                <Button variant="primary">
+                  <Plus size={16} className="mr-2" />
+                  New Job
+                </Button>
+              </div>
+            </div>
+
+            <BackupJobTable 
+              jobs={backupJobs}
+              onRun={handleRunBackupJob}
+              onDelete={handleDeleteBackupJob}
+            />
+          </div>
+        )}
+
+        {activeTab === 'platforms' && (
+          <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-white">Platform Connections</h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <PlatformConnector 
+                platform="vmware" 
+                onConnect={handleConnectPlatform} 
+                isConnected={platformStatus.vmware}
+              />
+              <PlatformConnector 
+                platform="proxmox" 
+                onConnect={handleConnectPlatform} 
+                isConnected={platformStatus.proxmox}
+              />
+              <PlatformConnector 
+                platform="xcpng" 
+                onConnect={handleConnectPlatform} 
+                isConnected={platformStatus.xcpng}
+              />
+              <PlatformConnector 
+                platform="ubuntu" 
+                onConnect={handleConnectPlatform} 
+                isConnected={platformStatus.ubuntu}
+              />
+            </div>
+          </div>
+        )}
+      </main>
+
+      <AddVMModal
+        isOpen={showAddVM}
+        onClose={() => setShowAddVM(false)}
+        availableVMs={getAllVMs()}
+        onAddVM={handleAddVM}
+      />
+    </div>
+  );
+};
+
+// Main App Component
+const App: React.FC = () => {
   return (
     <AuthProvider>
       <AuthGuard>
-        <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900">
-          <div className="fixed inset-0 opacity-10">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(6,182,212,0.1),transparent_70%)]"></div>
-            <div className="absolute inset-0 bg-[conic-gradient(from_0deg_at_50%_50%,transparent_0deg,rgba(6,182,212,0.05)_60deg,transparent_120deg)]"></div>
-          </div>
-
-          <div className="relative z-10">
-            <header className="border-b border-cyan-500 border-opacity-30 bg-gray-900 bg-opacity-80 backdrop-blur-sm">
-              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div className="flex justify-between items-center h-16">
-                  <div className="flex items-center space-x-4">
-                    <div className="flex items-center space-x-3">
-                      <Shield className="text-cyan-400" size={32} />
-                      <div>
-                        <h1 className="text-xl font-bold text-white uppercase tracking-wider">VM BACKUP SOLUTION</h1>
-                        <p className="text-cyan-400 text-xs font-mono">ENTERPRISE PROTECTION SYSTEM</p>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center space-x-6">
-                    <div className="flex items-center space-x-3">
-                      <StatusIndicator status="online" />
-                      <span className="text-cyan-400 text-sm font-mono">SYSTEM ONLINE</span>
-                    </div>
-                    <div className="text-cyan-400 font-mono text-sm">
-                      {new Date().toLocaleTimeString()}
-                    </div>
-                    {user && (
-                      <div className="flex items-center space-x-3">
-                        <div className="text-right">
-                          <div className="text-white text-sm font-medium">{user.full_name}</div>
-                          <div className="text-cyan-400 text-xs uppercase">{user.role}</div>
-                        </div>
-                        <GlowButton onClick={logout} size="sm" variant="secondary">
-                          <LogOut size={16} />
-                        </GlowButton>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </header>
-
-            <nav className="bg-gray-900 bg-opacity-60 border-b border-cyan-500 border-opacity-20">
-              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div className="flex space-x-8">
-                  {tabs.map((tab) => (
-                    <button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id as any)}
-                      className={`flex items-center space-x-2 py-4 px-2 border-b-2 font-mono text-sm uppercase tracking-wider transition-all duration-200 ${
-                        activeTab === tab.id
-                          ? 'border-cyan-400 text-cyan-400 bg-cyan-400 bg-opacity-10'
-                          : 'border-transparent text-gray-400 hover:text-cyan-300 hover:border-cyan-500 hover:border-opacity-50'
-                      }`}
-                    >
-                      {tab.icon}
-                      <span>{tab.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </nav>
-
-            <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-              {activeTab === 'dashboard' && (
-                <div className="space-y-8">
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <MetricDisplay
-                      title="Protected VMs"
-                      value={stats.total_vms_protected.toString()}
-                      icon={<Server />}
-                      trend="+3 this week"
-                      trendDirection="up"
-                    />
-                    <MetricDisplay
-                      title="Active Jobs"
-                      value={stats.total_backup_jobs.toString()}
-                      icon={<Shield />}
-                      trend="2 running"
-                      trendDirection="stable"
-                    />
-                    <MetricDisplay
-                      title="Storage Used"
-                      value={stats.total_backups_size}
-                      icon={<HardDrive />}
-                      trend="+120GB today"
-                      trendDirection="up"
-                    />
-                    <MetricDisplay
-                      title="Success Rate"
-                      value={stats.success_rate}
-                      icon={<CheckCircle />}
-                      trend="99.2% uptime"
-                      trendDirection="up"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <FuturisticCard>
-                      <h3 className="text-cyan-400 font-mono uppercase tracking-wider text-lg mb-4">SYSTEM STATUS</h3>
-                      <div className="space-y-3">
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-300">Backup Engine</span>
-                          <StatusIndicator status="online" />
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-300">Database Connection</span>
-                          <StatusIndicator status="online" />
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-300">Scheduler Service</span>
-                          <StatusIndicator status="online" />
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-300">Ubuntu Connector</span>
-                          <StatusIndicator status="online" />
-                        </div>
-                      </div>
-                    </FuturisticCard>
-
-                    <FuturisticCard>
-                      <h3 className="text-cyan-400 font-mono uppercase tracking-wider text-lg mb-4">RECENT ACTIVITY</h3>
-                      <div className="space-y-3">
-                        <div className="flex items-start space-x-3">
-                          <CheckCircle className="text-green-400 mt-1" size={16} />
-                          <div>
-                            <p className="text-white text-sm">web-server-01 backup completed</p>
-                            <p className="text-gray-400 text-xs font-mono">2 hours ago</p>
-                          </div>
-                        </div>
-                        <div className="flex items-start space-x-3">
-                          <RefreshCw className="text-cyan-400 mt-1 animate-spin" size={16} />
-                          <div>
-                            <p className="text-white text-sm">mail-server backup in progress</p>
-                            <p className="text-gray-400 text-xs font-mono">Running</p>
-                          </div>
-                        </div>
-                        <div className="flex items-start space-x-3">
-                          <Monitor className="text-orange-400 mt-1" size={16} />
-                          <div>
-                            <p className="text-white text-sm">Ubuntu laptop sync scheduled</p>
-                            <p className="text-gray-400 text-xs font-mono">In 3 hours</p>
-                          </div>
-                        </div>
-                      </div>
-                    </FuturisticCard>
-                  </div>
-                </div>
-              )}
-
-              {activeTab === 'vms' && (
-                <div className="space-y-6">
-                  <div className="flex justify-between items-center">
-                    <h2 className="text-2xl font-bold text-white uppercase tracking-wider font-mono">
-                      VIRTUAL MACHINES
-                    </h2>
-                    <div className="flex space-x-3">
-                      <GlowButton variant="secondary">
-                        <RefreshCw size={16} className="mr-2" />
-                        Scan Networks
-                      </GlowButton>
-                      <GlowButton variant="primary">
-                        <Plus size={16} className="mr-2" />
-                        Add VM
-                      </GlowButton>
-                    </div>
-                  </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {vms.map((vm) => (
-                      <VMCard key={vm.id} vm={vm} onBackup={handleBackupVM} />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {activeTab === 'ubuntu' && (
-                <div className="space-y-6">
-                  <div className="flex justify-between items-center">
-                    <h2 className="text-2xl font-bold text-white uppercase tracking-wider font-mono">
-                      UBUNTU MACHINES
-                    </h2>
-                    <div className="flex space-x-3">
-                      <GlowButton variant="secondary">
-                        <RefreshCw size={16} className="mr-2" />
-                        Refresh
-                      </GlowButton>
-                      <GlowButton variant="primary">
-                        <Search size={16} className="mr-2" />
-                        Discover
-                      </GlowButton>
-                    </div>
-                  </div>
-
-                  <UbuntuDiscovery onMachineConnect={handleUbuntuMachineConnect} />
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {ubuntuMachines.map((machine) => (
-                      <VMCard key={machine.id} vm={machine} onBackup={handleBackupVM} />
-                    ))}
-                  </div>
-
-                  {showUbuntuConnection && selectedMachine && (
-                    <UbuntuConnectionModal
-                      machine={selectedMachine}
-                      onClose={() => setShowUbuntuConnection(false)}
-                      onConnect={(connectionData) => handleConnectPlatform('ubuntu', connectionData)}
-                    />
-                  )}
-                </div>
-              )}
-
-              {activeTab === 'jobs' && (
-                <div className="space-y-6">
-                  <div className="flex justify-between items-center">
-                    <h2 className="text-2xl font-bold text-white uppercase tracking-wider font-mono">
-                      BACKUP OPERATIONS
-                    </h2>
-                    <div className="flex space-x-3">
-                      <GlowButton variant="secondary">
-                        <RefreshCw size={16} className="mr-2" />
-                        Refresh
-                      </GlowButton>
-                      <GlowButton variant="primary">
-                        <Plus size={16} className="mr-2" />
-                        New Operation
-                      </GlowButton>
-                    </div>
-                  </div>
-
-                  <BackupJobTable 
-                    jobs={backupJobs}
-                    onRun={handleRunBackupJob}
-                    onDelete={handleDeleteBackupJob}
-                  />
-                </div>
-              )}
-
-              {activeTab === 'platforms' && (
-                <div className="space-y-6">
-                  <h2 className="text-2xl font-bold text-white uppercase tracking-wider font-mono">
-                    PLATFORM CONTROL
-                  </h2>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <PlatformConnector platform="vmware" onConnect={handleConnectPlatform} />
-                    <PlatformConnector platform="proxmox" onConnect={handleConnectPlatform} />
-                    <PlatformConnector platform="xcpng" onConnect={handleConnectPlatform} />
-                    <PlatformConnector platform="ubuntu" onConnect={handleConnectPlatform} />
-                  </div>
-                </div>
-              )}
-            </main>
-          </div>
-        </div>
+        <VMBackupDashboard />
       </AuthGuard>
     </AuthProvider>
   );
 };
 
-export default VMBackupDashboard;
+export default App;

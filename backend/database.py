@@ -51,7 +51,7 @@ class VirtualMachine(Base):
     power_state = Column(String)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    metadata = Column(JSON)
+    vm_metadata = Column(JSON)  # Renamed from 'metadata' to avoid SQLAlchemy conflict
 
 class BackupRepository(Base):
     __tablename__ = "backup_repositories"
@@ -103,7 +103,7 @@ class BackupRecord(Base):
     file_path = Column(String)
     checksum = Column(String)
     error_message = Column(Text)
-    metadata = Column(JSON)
+    record_metadata = Column(JSON)  # Renamed from 'metadata' to avoid SQLAlchemy conflict
 
 class PlatformConnection(Base):
     __tablename__ = "platform_connections"
@@ -174,7 +174,7 @@ class VMResponse(VMBase):
     id: int
     created_at: datetime
     updated_at: datetime
-    metadata: Optional[Dict[str, Any]] = None
+    vm_metadata: Optional[Dict[str, Any]] = None  # Updated to match renamed column
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -261,7 +261,7 @@ class BackupRecordResponse(BackupRecordBase):
     file_path: Optional[str] = None
     checksum: Optional[str] = None
     error_message: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    record_metadata: Optional[Dict[str, Any]] = None  # Updated to match renamed column
     
     model_config = ConfigDict(from_attributes=True)
 

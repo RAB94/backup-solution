@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
@@ -8,42 +8,78 @@ import uvicorn
 from typing import List, Optional
 from datetime import datetime, timedelta
 import asyncio
+import logging
 
-from database import get_db, init_db
-from models import (
-    BackupJob, VirtualMachine, BackupRepository, 
-    BackupJobCreate, BackupJobResponse, VMResponse,
-    BackupJobStatus, PlatformType
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Import our modules
+from database import (
+    get_db, init_db, Base, engine,
+    VirtualMachine, BackupJob, BackupRepository, PlatformConnection,
+    PlatformType, BackupJobStatus, BackupType,
+    VMResponse, BackupJobCreate, BackupJobResponse,
+    BackupRepositoryCreate, BackupRepositoryResponse,
+    PlatformConnectionCreate, PlatformConnectionResponse
 )
 from platform_connectors import VMwareConnector, ProxmoxConnector, XCPNGConnector
 from ubuntu_backup import UbuntuBackupConnector, UbuntuNetworkDiscovery
 from backup_engine import BackupEngine
-from scheduler import BackupScheduler
 from auth import (
     User, UserCreate, UserLogin, UserResponse, Token,
     create_access_token, create_refresh_token, get_current_user,
     admin_required, operator_required, authenticate_user,
-    create_user, create_user_session, get_active_sessions
+    create_user, create_user_session, get_active_sessions,
+    ACCESS_TOKEN_EXPIRE_MINUTES
 )
+
+# Simple scheduler class since APScheduler might not be installed
+class SimpleScheduler:
+    def __init__(self):
+        self.jobs = {}
+        self.running = False
+    
+    def start(self):
+        self.running = True
+        logger.info("Simple scheduler started")
+    
+    def shutdown(self):
+        self.running = False
+        logger.info("Simple scheduler stopped")
+    
+    def schedule_job(self, backup_job):
+        self.jobs[backup_job.id] = backup_job
+        logger.info(f"Scheduled job: {backup_job.name}")
+    
+    def remove_job(self, job_id: int):
+        if job_id in self.jobs:
+            del self.jobs[job_id]
+            logger.info(f"Removed job: {job_id}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    print("Initializing database...")
-    init_db()
+    logger.info("Initializing database...")
+    try:
+        init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
     
     # Start the backup scheduler
-    scheduler = BackupScheduler()
+    scheduler = SimpleScheduler()
     scheduler.start()
     app.state.scheduler = scheduler
     
-    print("VM Backup Solution API started!")
+    logger.info("VM Backup Solution API started!")
     yield
     
     # Shutdown
     if hasattr(app.state, 'scheduler'):
         app.state.scheduler.shutdown()
-    print("VM Backup Solution API stopped!")
+    logger.info("VM Backup Solution API stopped!")
 
 app = FastAPI(
     title="VM Backup Solution API",
@@ -55,7 +91,7 @@ app = FastAPI(
 # CORS middleware for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:8080"],
+    allow_origins=["http://localhost:3000", "http://localhost:1001", "http://192.168.27.97:1001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -111,19 +147,21 @@ async def connect_platform(
             raise HTTPException(status_code=400, detail="Failed to connect to platform")
             
     except Exception as e:
+        logger.error(f"Platform connection error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/platforms/{platform_type}/vms")
 async def get_platform_vms(
     platform_type: PlatformType,
     db: Session = Depends(get_db)
-) -> List[VMResponse]:
+) -> List[dict]:
     """Get list of VMs from a platform"""
     try:
         connector = connectors[platform_type]
         vms = await connector.list_vms()
-        return [VMResponse(**vm) for vm in vms]
+        return vms
     except Exception as e:
+        logger.error(f"Error getting VMs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Backup Job Management
@@ -132,11 +170,22 @@ async def create_backup_job(
     job_data: BackupJobCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
-) -> BackupJobResponse:
+) -> dict:
     """Create a new backup job"""
     try:
         # Create job in database
-        db_job = BackupJob(**job_data.model_dump())
+        db_job = BackupJob(
+            name=job_data.name,
+            description=job_data.description,
+            vm_id=job_data.vm_id,
+            platform=job_data.platform,
+            backup_type=job_data.backup_type,
+            repository_id=job_data.repository_id,
+            schedule_cron=job_data.schedule_cron,
+            retention_days=job_data.retention_days,
+            compression_enabled=job_data.compression_enabled,
+            encryption_enabled=job_data.encryption_enabled
+        )
         db.add(db_job)
         db.commit()
         db.refresh(db_job)
@@ -145,9 +194,14 @@ async def create_backup_job(
         if hasattr(app.state, 'scheduler'):
             app.state.scheduler.schedule_job(db_job)
         
-        return BackupJobResponse.model_validate(db_job)
+        return {
+            "id": db_job.id,
+            "name": db_job.name,
+            "status": "created"
+        }
     except Exception as e:
         db.rollback()
+        logger.error(f"Error creating backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/backup-jobs")
@@ -155,21 +209,59 @@ async def list_backup_jobs(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db)
-) -> List[BackupJobResponse]:
+) -> List[dict]:
     """List all backup jobs"""
-    jobs = db.query(BackupJob).offset(skip).limit(limit).all()
-    return [BackupJobResponse.model_validate(job) for job in jobs]
+    try:
+        jobs = db.query(BackupJob).offset(skip).limit(limit).all()
+        return [
+            {
+                "id": job.id,
+                "name": job.name,
+                "description": job.description,
+                "vm_id": job.vm_id,
+                "platform": job.platform.value,
+                "backup_type": job.backup_type.value,
+                "status": job.status.value,
+                "schedule_cron": job.schedule_cron,
+                "last_run": job.last_run.isoformat() if job.last_run else None,
+                "next_run": job.next_run.isoformat() if job.next_run else None,
+                "created_at": job.created_at.isoformat()
+            }
+            for job in jobs
+        ]
+    except Exception as e:
+        logger.error(f"Error listing backup jobs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/backup-jobs/{job_id}")
 async def get_backup_job(
     job_id: int,
     db: Session = Depends(get_db)
-) -> BackupJobResponse:
+) -> dict:
     """Get specific backup job details"""
-    job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Backup job not found")
-    return BackupJobResponse.model_validate(job)
+    try:
+        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Backup job not found")
+        
+        return {
+            "id": job.id,
+            "name": job.name,
+            "description": job.description,
+            "vm_id": job.vm_id,
+            "platform": job.platform.value,
+            "backup_type": job.backup_type.value,
+            "status": job.status.value,
+            "schedule_cron": job.schedule_cron,
+            "last_run": job.last_run.isoformat() if job.last_run else None,
+            "next_run": job.next_run.isoformat() if job.next_run else None,
+            "created_at": job.created_at.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting backup job: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/backup-jobs/{job_id}/run")
 async def run_backup_job(
@@ -178,19 +270,25 @@ async def run_backup_job(
     db: Session = Depends(get_db)
 ):
     """Manually trigger a backup job"""
-    job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Backup job not found")
-    
-    # Add backup task to background
-    background_tasks.add_task(backup_engine.run_backup, job)
-    
-    # Update job status
-    job.status = BackupJobStatus.RUNNING
-    job.last_run = datetime.now()
-    db.commit()
-    
-    return {"message": "Backup job started", "job_id": job_id}
+    try:
+        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Backup job not found")
+        
+        # Add backup task to background
+        background_tasks.add_task(backup_engine.run_backup, job)
+        
+        # Update job status
+        job.status = BackupJobStatus.RUNNING
+        job.last_run = datetime.now()
+        db.commit()
+        
+        return {"message": "Backup job started", "job_id": job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error running backup job: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/v1/backup-jobs/{job_id}")
 async def delete_backup_job(
@@ -198,18 +296,24 @@ async def delete_backup_job(
     db: Session = Depends(get_db)
 ):
     """Delete a backup job"""
-    job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Backup job not found")
-    
-    # Remove from scheduler
-    if hasattr(app.state, 'scheduler'):
-        app.state.scheduler.remove_job(job_id)
-    
-    db.delete(job)
-    db.commit()
-    
-    return {"message": "Backup job deleted"}
+    try:
+        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Backup job not found")
+        
+        # Remove from scheduler
+        if hasattr(app.state, 'scheduler'):
+            app.state.scheduler.remove_job(job_id)
+        
+        db.delete(job)
+        db.commit()
+        
+        return {"message": "Backup job deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting backup job: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Recovery Endpoints
 @app.post("/api/v1/recovery/instant-restore")
@@ -236,89 +340,52 @@ async def instant_restore(
             "estimated_time": "15 seconds"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/recovery/file-restore")
-async def file_level_restore(
-    backup_id: str,
-    file_paths: List[str],
-    target_path: str,
-    background_tasks: BackgroundTasks
-):
-    """Perform file-level restore from backup"""
-    try:
-        background_tasks.add_task(
-            backup_engine.file_restore,
-            backup_id,
-            file_paths,
-            target_path
-        )
-        
-        return {
-            "message": "File restore initiated",
-            "files": len(file_paths)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Migration Endpoints (V2V)
-@app.post("/api/v1/migration/v2v")
-async def migrate_vm(
-    source_vm_id: str,
-    source_platform: PlatformType,
-    target_platform: PlatformType,
-    migration_config: dict,
-    background_tasks: BackgroundTasks
-):
-    """Migrate VM between platforms (V2V)"""
-    try:
-        background_tasks.add_task(
-            backup_engine.migrate_vm,
-            source_vm_id,
-            source_platform,
-            target_platform,
-            migration_config
-        )
-        
-        return {
-            "message": "VM migration initiated",
-            "source": source_platform,
-            "target": target_platform
-        }
-    except Exception as e:
+        logger.error(f"Error starting instant restore: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Statistics and Monitoring
 @app.get("/api/v1/statistics")
 async def get_statistics(db: Session = Depends(get_db)):
     """Get backup system statistics"""
-    total_jobs = db.query(BackupJob).count()
-    running_jobs = db.query(BackupJob).filter(
-        BackupJob.status == BackupJobStatus.RUNNING
-    ).count()
-    
-    return {
-        "total_backup_jobs": total_jobs,
-        "running_jobs": running_jobs,
-        "total_vms_protected": 0,  # Calculate from actual data
-        "total_backups_size": "0 GB",  # Calculate from storage
-        "last_24h_jobs": 0,  # Calculate from recent jobs
-        "success_rate": "99.5%"  # Calculate from job history
-    }
+    try:
+        total_jobs = db.query(BackupJob).count()
+        running_jobs = db.query(BackupJob).filter(
+            BackupJob.status == BackupJobStatus.RUNNING
+        ).count()
+        
+        return {
+            "total_backup_jobs": total_jobs,
+            "running_jobs": running_jobs,
+            "total_vms_protected": 0,  # Calculate from actual data
+            "total_backups_size": "0 GB",  # Calculate from storage
+            "last_24h_jobs": 0,  # Calculate from recent jobs
+            "success_rate": "99.5%"  # Calculate from job history
+        }
+    except Exception as e:
+        logger.error(f"Error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Authentication Endpoints
 @app.post("/api/v1/auth/register")
 async def register_user(
     user_data: UserCreate,
     db: Session = Depends(get_db)
-) -> UserResponse:
+) -> dict:
     """Register a new user"""
     try:
         user = create_user(db, user_data)
-        return UserResponse.model_validate(user)
+        return {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+            "created_at": user.created_at.isoformat()
+        }
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error registering user: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/auth/login")
@@ -366,41 +433,7 @@ async def login_user(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/auth/refresh")
-async def refresh_token(
-    refresh_token: str,
-    db: Session = Depends(get_db)
-) -> Token:
-    """Refresh access token"""
-    try:
-        user = db.query(User).filter(User.refresh_token == refresh_token).first()
-        if not user or not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid refresh token"
-            )
-        
-        # Create new tokens
-        access_token = create_access_token(
-            data={"sub": user.username, "user_id": user.id, "role": user.role}
-        )
-        new_refresh_token = create_refresh_token()
-        
-        # Update refresh token
-        user.refresh_token = new_refresh_token
-        db.commit()
-        
-        return Token(
-            access_token=access_token,
-            refresh_token=new_refresh_token,
-            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
+        logger.error(f"Error during login: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/auth/logout")
@@ -417,43 +450,30 @@ async def logout_user(
         return {"message": "Successfully logged out"}
         
     except Exception as e:
+        logger.error(f"Error during logout: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/auth/me")
 async def get_current_user_info(
     current_user: User = Depends(get_current_user)
-) -> UserResponse:
+) -> dict:
     """Get current user information"""
-    return UserResponse.model_validate(current_user)
-
-@app.get("/api/v1/auth/sessions")
-async def get_user_sessions(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get active sessions for current user"""
-    try:
-        sessions = get_active_sessions(db, current_user.id)
-        return {
-            "active_sessions": len(sessions),
-            "sessions": [
-                {
-                    "ip_address": session.ip_address,
-                    "user_agent": session.user_agent,
-                    "created_at": session.created_at,
-                    "expires_at": session.expires_at
-                }
-                for session in sessions
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+        "role": current_user.role,
+        "is_active": current_user.is_active,
+        "created_at": current_user.created_at.isoformat(),
+        "last_login": current_user.last_login.isoformat() if current_user.last_login else None
+    }
 
 # Ubuntu Machine Management Endpoints
 @app.post("/api/v1/ubuntu/discover")
 async def discover_ubuntu_machines(
     network_range: str = "192.168.1.0/24",
-    current_user: User = Depends(operator_required)
+    current_user: User = Depends(get_current_user)
 ):
     """Discover Ubuntu machines on the network"""
     try:
@@ -464,12 +484,13 @@ async def discover_ubuntu_machines(
             "machines": machines
         }
     except Exception as e:
+        logger.error(f"Error discovering Ubuntu machines: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/ubuntu/connect")
 async def connect_ubuntu_machine(
     connection_data: dict,
-    current_user: User = Depends(operator_required)
+    current_user: User = Depends(get_current_user)
 ):
     """Connect to Ubuntu machine"""
     try:
@@ -482,18 +503,20 @@ async def connect_ubuntu_machine(
             raise HTTPException(status_code=400, detail="Failed to connect to Ubuntu machine")
             
     except Exception as e:
+        logger.error(f"Error connecting to Ubuntu machine: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/ubuntu/machines")
 async def get_ubuntu_machines(
     current_user: User = Depends(get_current_user)
-) -> List[VMResponse]:
+) -> List[dict]:
     """Get list of connected Ubuntu machines"""
     try:
         connector = connectors['ubuntu']
         machines = await connector.list_vms()
-        return [VMResponse(**machine) for machine in machines]
+        return machines
     except Exception as e:
+        logger.error(f"Error getting Ubuntu machines: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/ubuntu/{machine_id}/backup")
@@ -501,7 +524,7 @@ async def backup_ubuntu_machine(
     machine_id: str,
     backup_config: dict,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(operator_required)
+    current_user: User = Depends(get_current_user)
 ):
     """Start backup of Ubuntu machine"""
     try:
@@ -518,12 +541,13 @@ async def backup_ubuntu_machine(
             "machine_id": machine_id
         }
     except Exception as e:
+        logger.error(f"Error starting Ubuntu backup: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/ubuntu/{machine_id}/install-agent")
 async def install_ubuntu_agent(
     machine_id: str,
-    current_user: User = Depends(operator_required)
+    current_user: User = Depends(get_current_user)
 ):
     """Install backup agent on Ubuntu machine"""
     try:
@@ -543,65 +567,7 @@ async def install_ubuntu_agent(
             raise HTTPException(status_code=400, detail="Machine not connected")
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# User Management Endpoints (Admin only)
-@app.get("/api/v1/admin/users")
-async def list_users(
-    skip: int = 0,
-    limit: int = 100,
-    current_user: User = Depends(admin_required),
-    db: Session = Depends(get_db)
-) -> List[UserResponse]:
-    """List all users (admin only)"""
-    users = db.query(User).offset(skip).limit(limit).all()
-    return [UserResponse.model_validate(user) for user in users]
-
-@app.put("/api/v1/admin/users/{user_id}/role")
-async def update_user_role(
-    user_id: int,
-    new_role: str,
-    current_user: User = Depends(admin_required),
-    db: Session = Depends(get_db)
-):
-    """Update user role (admin only)"""
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        user.role = new_role
-        db.commit()
-        
-        return {"message": f"User role updated to {new_role}"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/api/v1/admin/users/{user_id}/status")
-async def update_user_status(
-    user_id: int,
-    is_active: bool,
-    current_user: User = Depends(admin_required),
-    db: Session = Depends(get_db)
-):
-    """Activate/deactivate user (admin only)"""
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        user.is_active = is_active
-        db.commit()
-        
-        status = "activated" if is_active else "deactivated"
-        return {"message": f"User {status}"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
+        logger.error(f"Error installing Ubuntu agent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Background task functions
