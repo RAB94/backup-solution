@@ -1,14 +1,19 @@
-# main.py
+# Updated main.py with database persistence for platform connections
+
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 import uvicorn
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import asyncio
 import logging
+import json
+from cryptography.fernet import Fernet
+import base64
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +38,176 @@ from auth import (
     create_user, create_user_session, get_active_sessions,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
+
+# Encryption for storing sensitive connection data
+class ConnectionEncryption:
+    def __init__(self):
+        # In production, store this securely (environment variable, vault, etc.)
+        self.key = os.getenv('ENCRYPTION_KEY', 'your-encryption-key-here-change-in-production')
+        if len(self.key) < 32:
+            # Generate a simple key for development
+            self.key = base64.urlsafe_b64encode(b'dev-key-32-chars-long-change-me!').decode()[:32]
+        self.cipher = Fernet(base64.urlsafe_b64encode(self.key.encode()[:32]))
+    
+    def encrypt(self, data: str) -> str:
+        """Encrypt sensitive data"""
+        return self.cipher.encrypt(data.encode()).decode()
+    
+    def decrypt(self, encrypted_data: str) -> str:
+        """Decrypt sensitive data"""
+        return self.cipher.decrypt(encrypted_data.encode()).decode()
+
+encryption = ConnectionEncryption()
+
+# Platform Connection Manager
+class PlatformConnectionManager:
+    def __init__(self, connectors: Dict[PlatformType, Any]):
+        self.connectors = connectors
+        self.active_connections = {}
+    
+    async def save_connection(self, db: Session, platform: str, connection_data: Dict[str, Any]) -> PlatformConnection:
+        """Save platform connection to database"""
+        try:
+            # Encrypt sensitive fields
+            encrypted_password = encryption.encrypt(connection_data.get('password', ''))
+            encrypted_ssh_key = encryption.encrypt(connection_data.get('ssh_key_path', ''))
+            
+            # Check if connection already exists
+            existing = db.query(PlatformConnection).filter(
+                PlatformConnection.platform == PlatformType(platform),
+                PlatformConnection.host == connection_data['host']
+            ).first()
+            
+            if existing:
+                # Update existing connection
+                existing.username = connection_data['username']
+                existing.password_encrypted = encrypted_password
+                existing.port = connection_data['port']
+                existing.ssl_enabled = connection_data.get('ssl_enabled', True)
+                existing.is_active = True
+                existing.last_connected = datetime.now()
+                existing.connection_settings = {
+                    'use_key': connection_data.get('use_key', False),
+                    'ssh_key_path_encrypted': encrypted_ssh_key
+                }
+                db.commit()
+                db.refresh(existing)
+                return existing
+            else:
+                # Create new connection
+                new_connection = PlatformConnection(
+                    name=f"{platform}-{connection_data['host']}",
+                    platform=PlatformType(platform),
+                    host=connection_data['host'],
+                    port=connection_data['port'],
+                    username=connection_data['username'],
+                    password_encrypted=encrypted_password,
+                    ssl_enabled=connection_data.get('ssl_enabled', True),
+                    is_active=True,
+                    last_connected=datetime.now(),
+                    connection_settings={
+                        'use_key': connection_data.get('use_key', False),
+                        'ssh_key_path_encrypted': encrypted_ssh_key
+                    }
+                )
+                db.add(new_connection)
+                db.commit()
+                db.refresh(new_connection)
+                return new_connection
+                
+        except Exception as e:
+            logger.error(f"Failed to save connection: {e}")
+            raise
+    
+    async def restore_connections(self, db: Session) -> Dict[str, bool]:
+        """Restore all active platform connections from database"""
+        restored = {'vmware': False, 'proxmox': False, 'xcpng': False, 'ubuntu': False}
+        
+        try:
+            active_connections = db.query(PlatformConnection).filter(
+                PlatformConnection.is_active == True
+            ).all()
+            
+            logger.info(f"Found {len(active_connections)} stored connections to restore")
+            
+            for conn in active_connections:
+                try:
+                    platform = conn.platform.value
+                    logger.info(f"Restoring connection to {platform} ({conn.host})")
+                    
+                    # Decrypt connection data
+                    password = encryption.decrypt(conn.password_encrypted) if conn.password_encrypted else ''
+                    ssh_key_path = ''
+                    use_key = False
+                    
+                    if conn.connection_settings:
+                        use_key = conn.connection_settings.get('use_key', False)
+                        encrypted_ssh_key = conn.connection_settings.get('ssh_key_path_encrypted', '')
+                        if encrypted_ssh_key:
+                            ssh_key_path = encryption.decrypt(encrypted_ssh_key)
+                    
+                    connection_data = {
+                        'host': conn.host,
+                        'username': conn.username,
+                        'password': password,
+                        'port': conn.port,
+                        'use_key': use_key,
+                        'ssh_key_path': ssh_key_path
+                    }
+                    
+                    # Attempt to reconnect
+                    if platform == 'ubuntu':
+                        connector = self.connectors['ubuntu']
+                    else:
+                        connector = self.connectors[PlatformType(platform)]
+                    
+                    success = await connector.connect(connection_data)
+                    if success:
+                        restored[platform] = True
+                        self.active_connections[platform] = conn
+                        # Update last connected time
+                        conn.last_connected = datetime.now()
+                        logger.info(f"✅ Successfully restored {platform} connection")
+                    else:
+                        logger.warning(f"❌ Failed to restore {platform} connection")
+                        # Mark as inactive but don't delete
+                        conn.is_active = False
+                        
+                except Exception as e:
+                    logger.error(f"Error restoring {conn.platform.value} connection: {e}")
+                    conn.is_active = False
+            
+            db.commit()
+            return restored
+            
+        except Exception as e:
+            logger.error(f"Error restoring connections: {e}")
+            return restored
+    
+    async def get_stored_connections(self, db: Session) -> List[Dict[str, Any]]:
+        """Get all stored connections for display"""
+        try:
+            connections = db.query(PlatformConnection).all()
+            result = []
+            
+            for conn in connections:
+                result.append({
+                    'id': conn.id,
+                    'name': conn.name,
+                    'platform': conn.platform.value,
+                    'host': conn.host,
+                    'port': conn.port,
+                    'username': conn.username,
+                    'is_active': conn.is_active,
+                    'last_connected': conn.last_connected.isoformat() if conn.last_connected else None,
+                    'created_at': conn.created_at.isoformat()
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting stored connections: {e}")
+            return []
 
 # Simple scheduler class since APScheduler might not be installed
 class SimpleScheduler:
@@ -73,6 +248,37 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
     
+    # Initialize platform connectors
+    connectors = {
+        PlatformType.VMWARE: VMwareConnector(),
+        PlatformType.PROXMOX: ProxmoxConnector(),
+        PlatformType.XCPNG: XCPNGConnector(),
+        'ubuntu': UbuntuBackupConnector()
+    }
+    
+    # Initialize connection manager
+    connection_manager = PlatformConnectionManager(connectors)
+    app.state.connectors = connectors
+    app.state.connection_manager = connection_manager
+    
+    # Restore platform connections from database
+    logger.info("Restoring platform connections from database...")
+    db = next(get_db())
+    try:
+        restored = await connection_manager.restore_connections(db)
+        connected_count = sum(restored.values())
+        logger.info(f"✅ Restored {connected_count} platform connections: {restored}")
+        app.state.platform_status = restored
+    except Exception as e:
+        logger.error(f"Failed to restore connections: {e}")
+        app.state.platform_status = {'vmware': False, 'proxmox': False, 'xcpng': False, 'ubuntu': False}
+    finally:
+        db.close()
+    
+    # Initialize backup engine
+    backup_engine = BackupEngine(connectors)
+    app.state.backup_engine = backup_engine
+    
     logger.info("VM Backup Solution API started!")
     yield
     
@@ -97,17 +303,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Platform connectors
-connectors = {
-    PlatformType.VMWARE: VMwareConnector(),
-    PlatformType.PROXMOX: ProxmoxConnector(),
-    PlatformType.XCPNG: XCPNGConnector(),
-    'ubuntu': UbuntuBackupConnector()  # Add Ubuntu connector
-}
-
-# Backup engine
-backup_engine = BackupEngine(connectors)
-
 @app.get("/")
 async def root():
     return {
@@ -118,6 +313,7 @@ async def root():
 
 @app.get("/api/v1/health")
 async def health_check():
+    platform_status = getattr(app.state, 'platform_status', {})
     return {
         "status": "healthy",
         "timestamp": datetime.now(),
@@ -125,29 +321,130 @@ async def health_check():
             "database": "connected",
             "backup_engine": "running",
             "scheduler": "active"
-        }
+        },
+        "platform_connections": platform_status
     }
 
-# Platform Management Endpoints
+# NEW: Get platform status endpoint
+@app.get("/api/v1/platforms/status")
+async def get_platform_status():
+    """Get current platform connection status"""
+    return getattr(app.state, 'platform_status', {
+        'vmware': False, 'proxmox': False, 'xcpng': False, 'ubuntu': False
+    })
+
+# NEW: Get stored connections endpoint
+@app.get("/api/v1/platforms/connections")
+async def get_stored_connections(db: Session = Depends(get_db)):
+    """Get all stored platform connections"""
+    connection_manager = app.state.connection_manager
+    return await connection_manager.get_stored_connections(db)
+
+# UPDATED: Platform Management Endpoints with database persistence
 @app.post("/api/v1/platforms/{platform_type}/connect")
 async def connect_platform(
     platform_type: PlatformType,
     connection_data: dict,
     db: Session = Depends(get_db)
 ):
-    """Connect to a virtualization platform"""
+    """Connect to a virtualization platform and save to database"""
     try:
-        connector = connectors[platform_type]
+        logger.info(f"Attempting to connect to {platform_type} at {connection_data.get('host')}")
+        
+        connectors = app.state.connectors
+        connection_manager = app.state.connection_manager
+        
+        if platform_type.value == 'ubuntu':
+            connector = connectors['ubuntu']
+        else:
+            connector = connectors[platform_type]
+        
+        # Attempt connection
         success = await connector.connect(connection_data)
         
         if success:
-            # Store connection info (encrypted in production)
-            return {"status": "connected", "platform": platform_type}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to connect to platform")
+            # Save connection to database
+            saved_connection = await connection_manager.save_connection(
+                db, platform_type.value, connection_data
+            )
             
+            # Update platform status in app state
+            if not hasattr(app.state, 'platform_status'):
+                app.state.platform_status = {'vmware': False, 'proxmox': False, 'xcpng': False, 'ubuntu': False}
+            
+            app.state.platform_status[platform_type.value] = True
+            
+            logger.info(f"Successfully connected and saved {platform_type}")
+            return {
+                "status": "connected", 
+                "platform": platform_type,
+                "message": f"Successfully connected to {platform_type.value.upper()}",
+                "connection_id": saved_connection.id
+            }
+        else:
+            error_msg = f"Failed to connect to {platform_type.value.upper()}: Connection test failed"
+            logger.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
+            
+    except HTTPException:
+        raise
     except Exception as e:
+        error_msg = f"Failed to connect to {platform_type.value.upper()}: {str(e)}"
         logger.error(f"Platform connection error: {e}")
+        
+        # Provide more specific error messages based on common issues
+        if "timeout" in str(e).lower():
+            error_msg = f"Connection timeout to {platform_type.value.upper()}. Please check the host address and network connectivity."
+        elif "authentication" in str(e).lower() or "credential" in str(e).lower():
+            error_msg = f"Authentication failed for {platform_type.value.upper()}. Please check your username and password."
+        elif "permission" in str(e).lower() or "unauthorized" in str(e).lower():
+            error_msg = f"Permission denied for {platform_type.value.upper()}. Please check user permissions."
+        elif "not found" in str(e).lower() or "unknown host" in str(e).lower():
+            error_msg = f"Host not found for {platform_type.value.upper()}. Please check the host address."
+        elif "proxmoxer" in str(e).lower():
+            error_msg = f"Proxmox API library not available. Please install proxmoxer: pip install proxmoxer"
+        elif "paramiko" in str(e).lower():
+            error_msg = f"SSH library not available. Please install paramiko: pip install paramiko"
+        
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.delete("/api/v1/platforms/{platform_type}/disconnect")
+async def disconnect_platform(
+    platform_type: PlatformType,
+    db: Session = Depends(get_db)
+):
+    """Disconnect from platform and update database"""
+    try:
+        connectors = app.state.connectors
+        
+        if platform_type.value == 'ubuntu':
+            connector = connectors['ubuntu']
+        else:
+            connector = connectors[platform_type]
+        
+        # Disconnect from platform
+        await connector.disconnect()
+        
+        # Mark connections as inactive in database
+        connections = db.query(PlatformConnection).filter(
+            PlatformConnection.platform == platform_type,
+            PlatformConnection.is_active == True
+        ).all()
+        
+        for conn in connections:
+            conn.is_active = False
+        
+        db.commit()
+        
+        # Update platform status
+        if hasattr(app.state, 'platform_status'):
+            app.state.platform_status[platform_type.value] = False
+        
+        logger.info(f"Disconnected from {platform_type}")
+        return {"status": "disconnected", "platform": platform_type}
+        
+    except Exception as e:
+        logger.error(f"Failed to disconnect from {platform_type}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/platforms/{platform_type}/vms")
@@ -155,36 +452,144 @@ async def get_platform_vms(
     platform_type: PlatformType,
     db: Session = Depends(get_db)
 ) -> List[dict]:
-    """Get list of VMs from a platform"""
+    """Get list of VMs from a platform with better error handling"""
     try:
-        connector = connectors[platform_type]
+        connectors = app.state.connectors
+        
+        if platform_type.value == 'ubuntu':
+            connector = connectors['ubuntu']
+        else:
+            connector = connectors[platform_type]
+        
+        if not connector.connected:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Not connected to {platform_type.value.upper()}. Please connect first."
+            )
+        
+        logger.info(f"Getting VMs from {platform_type}")
         vms = await connector.list_vms()
+        
+        # Store/update VMs in database
+        for vm_data in vms:
+            existing_vm = db.query(VirtualMachine).filter(
+                VirtualMachine.vm_id == vm_data['vm_id'],
+                VirtualMachine.platform == platform_type
+            ).first()
+            
+            if existing_vm:
+                # Update existing VM
+                existing_vm.name = vm_data['name']
+                existing_vm.host = vm_data['host']
+                existing_vm.cpu_count = vm_data['cpu_count']
+                existing_vm.memory_mb = vm_data['memory_mb']
+                existing_vm.disk_size_gb = vm_data['disk_size_gb']
+                existing_vm.operating_system = vm_data['operating_system']
+                existing_vm.power_state = vm_data['power_state']
+                existing_vm.updated_at = datetime.now()
+            else:
+                # Create new VM record
+                new_vm = VirtualMachine(
+                    vm_id=vm_data['vm_id'],
+                    name=vm_data['name'],
+                    platform=platform_type,
+                    host=vm_data['host'],
+                    cpu_count=vm_data['cpu_count'],
+                    memory_mb=vm_data['memory_mb'],
+                    disk_size_gb=vm_data['disk_size_gb'],
+                    operating_system=vm_data['operating_system'],
+                    power_state=vm_data['power_state']
+                )
+                db.add(new_vm)
+        
+        db.commit()
+        
+        logger.info(f"Successfully retrieved {len(vms)} VMs from {platform_type}")
         return vms
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error getting VMs: {e}")
+        error_msg = f"Failed to get VMs from {platform_type.value.upper()}: {str(e)}"
+        logger.error(error_msg)
+        
+        if "not connected" in str(e).lower():
+            error_msg = f"Not connected to {platform_type.value.upper()}. Please connect first."
+        elif "timeout" in str(e).lower():
+            error_msg = f"Timeout getting VMs from {platform_type.value.upper()}. The operation took too long."
+        elif "permission" in str(e).lower():
+            error_msg = f"Permission denied getting VMs from {platform_type.value.upper()}. Check user permissions."
+        
+        raise HTTPException(status_code=500, detail=error_msg)
+
+# NEW: Get all VMs from database
+@app.get("/api/v1/vms")
+async def get_all_vms(db: Session = Depends(get_db)) -> List[dict]:
+    """Get all VMs from database"""
+    try:
+        vms = db.query(VirtualMachine).all()
+        return [
+            {
+                "id": vm.id,
+                "vm_id": vm.vm_id,
+                "name": vm.name,
+                "platform": vm.platform.value,
+                "host": vm.host,
+                "ip_address": vm.host,  # Using host as IP for now
+                "cpu_count": vm.cpu_count,
+                "memory_mb": vm.memory_mb,
+                "disk_size_gb": vm.disk_size_gb,
+                "operating_system": vm.operating_system,
+                "power_state": vm.power_state,
+                "created_at": vm.created_at.isoformat()
+            }
+            for vm in vms
+        ]
+    except Exception as e:
+        logger.error(f"Error getting all VMs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Backup Job Management
+# UPDATED: Backup Jobs with proper repository handling
 @app.post("/api/v1/backup-jobs")
 async def create_backup_job(
-    job_data: BackupJobCreate,
+    job_data: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ) -> dict:
     """Create a new backup job"""
     try:
+        # Ensure default repository exists
+        default_repo = db.query(BackupRepository).filter(
+            BackupRepository.id == 1
+        ).first()
+        
+        if not default_repo:
+            # Create default repository
+            default_repo = BackupRepository(
+                id=1,
+                name="Default Local Storage",
+                storage_type="local",
+                connection_string="/app/backups",
+                capacity_gb=1000,
+                encryption_enabled=True,
+                settings={"compression": True}
+            )
+            db.add(default_repo)
+            db.commit()
+            db.refresh(default_repo)
+        
         # Create job in database
         db_job = BackupJob(
-            name=job_data.name,
-            description=job_data.description,
-            vm_id=job_data.vm_id,
-            platform=job_data.platform,
-            backup_type=job_data.backup_type,
-            repository_id=job_data.repository_id,
-            schedule_cron=job_data.schedule_cron,
-            retention_days=job_data.retention_days,
-            compression_enabled=job_data.compression_enabled,
-            encryption_enabled=job_data.encryption_enabled
+            name=job_data['name'],
+            description=job_data.get('description', ''),
+            vm_id=job_data['vm_id'],
+            platform=PlatformType(job_data['platform']),
+            backup_type=BackupType(job_data['backup_type']),
+            repository_id=job_data.get('repository_id', 1),
+            schedule_cron=job_data['schedule_cron'],
+            retention_days=job_data.get('retention_days', 30),
+            compression_enabled=job_data.get('compression_enabled', True),
+            encryption_enabled=job_data.get('encryption_enabled', True)
         )
         db.add(db_job)
         db.commit()
@@ -194,584 +599,20 @@ async def create_backup_job(
         if hasattr(app.state, 'scheduler'):
             app.state.scheduler.schedule_job(db_job)
         
+        logger.info(f"Created backup job: {db_job.name}")
+        
         return {
             "id": db_job.id,
             "name": db_job.name,
-            "status": "created"
+            "status": "created",
+            "vm_id": db_job.vm_id,
+            "platform": db_job.platform.value,
+            "backup_type": db_job.backup_type.value,
+            "schedule_cron": db_job.schedule_cron
         }
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating backup job: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/vms/scan")
-async def scan_vm_by_ip(
-    scan_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Scan and detect VM by IP address"""
-    try:
-        ip = scan_data.get('ip')
-        platform = scan_data.get('platform', 'unknown')
-        username = scan_data.get('username', '')
-        password = scan_data.get('password', '')
-        port = scan_data.get('port', 22)
-        
-        logger.info(f"Scanning VM at {ip} for platform {platform}")
-        
-        if platform == 'ubuntu':
-            # Use Ubuntu connector for scanning
-            connector = connectors['ubuntu']
-            connection_params = {
-                'ip': ip,
-                'username': username,
-                'password': password,
-                'port': port
-            }
-            
-            if await connector.connect(connection_params):
-                machines = await connector.list_vms()
-                if machines:
-                    return machines[0]
-        
-        elif platform in ['vmware', 'proxmox', 'xcpng']:
-            # Try to connect to the platform and get VM info
-            connector = connectors.get(PlatformType(platform))
-            if connector:
-                connection_params = {
-                    'host': ip,
-                    'username': username,
-                    'password': password,
-                    'port': port
-                }
-                
-                if await connector.connect(connection_params):
-                    vms = await connector.list_vms()
-                    # Find VM that matches the IP or return first one
-                    for vm in vms:
-                        if vm.get('host') == ip or vm.get('ip_address') == ip:
-                            return vm
-                    if vms:
-                        return vms[0]
-        
-        # Fallback: create basic VM info from scan data
-        vm_info = {
-            'vm_id': f"manual-{ip}",
-            'name': f"{platform}-{ip}",
-            'platform': platform,
-            'host': ip,
-            'ip_address': ip,
-            'cpu_count': 2,
-            'memory_mb': 4096,
-            'disk_size_gb': 50,
-            'operating_system': 'Unknown',
-            'power_state': 'unknown',
-            'created_at': datetime.now().isoformat()
-        }
-        
-        return vm_info
-        
-    except Exception as e:
-        logger.error(f"VM scan failed: {e}")
-        raise HTTPException(status_code=500, detail=f"VM scan failed: {str(e)}")
-
-@app.post("/api/v1/vms/scan")
-async def scan_vm_by_ip(
-    scan_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Scan and detect VM by IP address"""
-    try:
-        ip = scan_data.get('ip')
-        platform = scan_data.get('platform', 'unknown')
-        username = scan_data.get('username', '')
-        password = scan_data.get('password', '')
-        port = scan_data.get('port', 22)
-        
-        logger.info(f"Scanning VM at {ip} for platform {platform}")
-        
-        if platform == 'ubuntu':
-            # Use Ubuntu connector for scanning
-            connector = connectors['ubuntu']
-            connection_params = {
-                'ip': ip,
-                'username': username,
-                'password': password,
-                'port': port
-            }
-            
-            if await connector.connect(connection_params):
-                machines = await connector.list_vms()
-                if machines:
-                    return machines[0]
-        
-        elif platform in ['vmware', 'proxmox', 'xcpng']:
-            # Try to connect to the platform and get VM info
-            connector = connectors.get(PlatformType(platform))
-            if connector:
-                connection_params = {
-                    'host': ip,
-                    'username': username,
-                    'password': password,
-                    'port': port
-                }
-                
-                if await connector.connect(connection_params):
-                    vms = await connector.list_vms()
-                    # Find VM that matches the IP or return first one
-                    for vm in vms:
-                        if vm.get('host') == ip or vm.get('ip_address') == ip:
-                            return vm
-                    if vms:
-                        return vms[0]
-        
-        # Fallback: create basic VM info from scan data
-        vm_info = {
-            'vm_id': f"manual-{ip}",
-            'name': f"{platform}-{ip}",
-            'platform': platform,
-            'host': ip,
-            'ip_address': ip,
-            'cpu_count': 2,
-            'memory_mb': 4096,
-            'disk_size_gb': 50,
-            'operating_system': 'Unknown',
-            'power_state': 'unknown',
-            'created_at': datetime.now().isoformat()
-        }
-        
-        return vm_info
-        
-    except Exception as e:
-        logger.error(f"VM scan failed: {e}")
-        raise HTTPException(status_code=500, detail=f"VM scan failed: {str(e)}")
-
-@app.post("/api/v1/vms/manual")
-async def add_vm_manually(
-    vm_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Add VM manually with user-provided information"""
-    try:
-        # Create VM record in database
-        db_vm = VirtualMachine(
-            vm_id=vm_data.get('vm_id', f"manual-{vm_data.get('ip_address', 'unknown')}"),
-            name=vm_data.get('name'),
-            platform=PlatformType(vm_data.get('platform')),
-            host=vm_data.get('ip_address'),
-            cpu_count=vm_data.get('cpu_count', 2),
-            memory_mb=vm_data.get('memory_mb', 4096),
-            disk_size_gb=vm_data.get('disk_size_gb', 50),
-            operating_system=vm_data.get('operating_system', 'Unknown'),
-            power_state='unknown',
-            vm_metadata={'manually_added': True, 'notes': vm_data.get('notes', '')}
-        )
-        
-        db.add(db_vm)
-        db.commit()
-        db.refresh(db_vm)
-        
-        return {
-            'id': db_vm.id,
-            'vm_id': db_vm.vm_id,
-            'name': db_vm.name,
-            'platform': db_vm.platform.value,
-            'host': db_vm.host,
-            'ip_address': db_vm.host,
-            'cpu_count': db_vm.cpu_count,
-            'memory_mb': db_vm.memory_mb,
-            'disk_size_gb': db_vm.disk_size_gb,
-            'operating_system': db_vm.operating_system,
-            'power_state': db_vm.power_state,
-            'created_at': db_vm.created_at.isoformat()
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to add VM manually: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to add VM: {str(e)}")
-
-@app.put("/api/v1/vms/{vm_id}")
-async def update_vm(
-    vm_id: str,
-    vm_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Update VM information"""
-    try:
-        # Find existing VM in database
-        db_vm = db.query(VirtualMachine).filter(VirtualMachine.vm_id == vm_id).first()
-        
-        if not db_vm:
-            # Create new VM record if it doesn't exist
-            db_vm = VirtualMachine(
-                vm_id=vm_id,
-                name=vm_data.get('name', 'Unknown VM'),
-                platform=PlatformType(vm_data.get('platform', 'vmware')),
-                host=vm_data.get('ip_address', vm_data.get('host', 'unknown')),
-                cpu_count=vm_data.get('cpu_count', 2),
-                memory_mb=vm_data.get('memory_mb', 4096),
-                disk_size_gb=vm_data.get('disk_size_gb', 50),
-                operating_system=vm_data.get('operating_system', 'Unknown'),
-                power_state=vm_data.get('power_state', 'unknown'),
-                vm_metadata={'updated_via_api': True}
-            )
-            db.add(db_vm)
-        else:
-            # Update existing VM
-            if 'name' in vm_data:
-                db_vm.name = vm_data['name']
-            if 'operating_system' in vm_data:
-                db_vm.operating_system = vm_data['operating_system']
-            if 'cpu_count' in vm_data:
-                db_vm.cpu_count = vm_data['cpu_count']
-            if 'memory_mb' in vm_data:
-                db_vm.memory_mb = vm_data['memory_mb']
-            if 'disk_size_gb' in vm_data:
-                db_vm.disk_size_gb = vm_data['disk_size_gb']
-            if 'ip_address' in vm_data:
-                db_vm.host = vm_data['ip_address']
-            
-            db_vm.updated_at = datetime.now()
-        
-        db.commit()
-        db.refresh(db_vm)
-        
-        return {
-            'id': db_vm.id,
-            'vm_id': db_vm.vm_id,
-            'name': db_vm.name,
-            'platform': db_vm.platform.value,
-            'host': db_vm.host,
-            'ip_address': db_vm.host,
-            'cpu_count': db_vm.cpu_count,
-            'memory_mb': db_vm.memory_mb,
-            'disk_size_gb': db_vm.disk_size_gb,
-            'operating_system': db_vm.operating_system,
-            'power_state': db_vm.power_state,
-            'created_at': db_vm.created_at.isoformat()
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update VM {vm_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update VM: {str(e)}")
-
-@app.post("/api/v1/discovery/network")
-async def discover_network_range(
-    discovery_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Discover devices on network range"""
-    try:
-        network_range = discovery_data.get('network_range', '192.168.1.0/24')
-        logger.info(f"Discovering devices in network range: {network_range}")
-        
-        # Use Ubuntu network discovery as it's the most generic
-        ubuntu_connector = connectors.get('ubuntu')
-        if ubuntu_connector:
-            discovered = await ubuntu_connector.discover_ubuntu_machines(network_range)
-            
-            # Enhanced discovery - try to detect platform types
-            enhanced_devices = []
-            for device in discovered:
-                enhanced_device = device.copy()
-                
-                # Try to detect platform based on open ports and services
-                ip = device.get('ip')
-                if ip:
-                    try:
-                        import socket
-                        
-                        # Check for common virtualization platform ports
-                        platform_ports = {
-                            443: 'vmware',  # vCenter/ESXi HTTPS
-                            902: 'vmware',  # VMware Auth
-                            8006: 'proxmox',  # Proxmox Web UI
-                            80: 'xcpng',    # XCP-ng Web UI (also check for specific headers)
-                            22: 'ubuntu'    # SSH (Ubuntu/Linux)
-                        }
-                        
-                        open_ports = []
-                        detected_platform = 'unknown'
-                        
-                        for port, platform in platform_ports.items():
-                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            sock.settimeout(2)
-                            result = sock.connect_ex((ip, port))
-                            if result == 0:
-                                open_ports.append(port)
-                                if detected_platform == 'unknown':
-                                    detected_platform = platform
-                            sock.close()
-                        
-                        enhanced_device['open_ports'] = open_ports
-                        enhanced_device['platform'] = detected_platform
-                        
-                    except Exception as scan_error:
-                        logger.warning(f"Port scan failed for {ip}: {scan_error}")
-                        enhanced_device['platform'] = 'unknown'
-                        enhanced_device['open_ports'] = []
-                
-                enhanced_devices.append(enhanced_device)
-            
-            return {
-                'network_range': network_range,
-                'discovered_count': len(enhanced_devices),
-                'discovered': enhanced_devices
-            }
-        
-        return {
-            'network_range': network_range,
-            'discovered_count': 0,
-            'discovered': []
-        }
-        
-    except Exception as e:
-        logger.error(f"Network discovery failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Network discovery failed: {str(e)}")
-
-@app.post("/api/v1/platforms/{platform_type}/refresh")
-async def refresh_platform_vms(
-    platform_type: PlatformType,
-    db: Session = Depends(get_db)
-):
-    """Refresh VM list for a specific platform"""
-    try:
-        connector = connectors.get(platform_type)
-        if not connector:
-            raise HTTPException(status_code=400, detail=f"Platform {platform_type} not supported")
-        
-        if not connector.connected:
-            raise HTTPException(status_code=400, detail=f"Not connected to {platform_type}")
-        
-        vms = await connector.list_vms()
-        
-        # Update database with discovered VMs
-        for vm_data in vms:
-            existing_vm = db.query(VirtualMachine).filter(
-                VirtualMachine.vm_id == vm_data['vm_id'],
-                VirtualMachine.platform == platform_type
-            ).first()
-            
-            if existing_vm:
-                # Update existing VM
-                existing_vm.name = vm_data['name']
-                existing_vm.host = vm_data['host']
-                existing_vm.cpu_count = vm_data['cpu_count']
-                existing_vm.memory_mb = vm_data['memory_mb']
-                existing_vm.disk_size_gb = vm_data['disk_size_gb']
-                existing_vm.operating_system = vm_data['operating_system']
-                existing_vm.power_state = vm_data['power_state']
-                existing_vm.updated_at = datetime.now()
-            else:
-                # Create new VM record
-                new_vm = VirtualMachine(
-                    vm_id=vm_data['vm_id'],
-                    name=vm_data['name'],
-                    platform=platform_type,
-                    host=vm_data['host'],
-                    cpu_count=vm_data['cpu_count'],
-                    memory_mb=vm_data['memory_mb'],
-                    disk_size_gb=vm_data['disk_size_gb'],
-                    operating_system=vm_data['operating_system'],
-                    power_state=vm_data['power_state']
-                )
-                db.add(new_vm)
-        
-        db.commit()
-        
-        return {
-            'platform': platform_type.value,
-            'vms_discovered': len(vms),
-            'vms': vms
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to refresh VMs for {platform_type}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/vms/manual")
-async def add_vm_manually(
-    vm_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Add VM manually with user-provided information"""
-    try:
-        # Create VM record in database
-        db_vm = VirtualMachine(
-            vm_id=vm_data.get('vm_id', f"manual-{vm_data.get('ip_address', 'unknown')}"),
-            name=vm_data.get('name'),
-            platform=PlatformType(vm_data.get('platform')),
-            host=vm_data.get('ip_address'),
-            cpu_count=vm_data.get('cpu_count', 2),
-            memory_mb=vm_data.get('memory_mb', 4096),
-            disk_size_gb=vm_data.get('disk_size_gb', 50),
-            operating_system=vm_data.get('operating_system', 'Unknown'),
-            power_state='unknown',
-            vm_metadata={'manually_added': True, 'notes': vm_data.get('notes', '')}
-        )
-        
-        db.add(db_vm)
-        db.commit()
-        db.refresh(db_vm)
-        
-        return {
-            'id': db_vm.id,
-            'vm_id': db_vm.vm_id,
-            'name': db_vm.name,
-            'platform': db_vm.platform.value,
-            'host': db_vm.host,
-            'ip_address': db_vm.host,
-            'cpu_count': db_vm.cpu_count,
-            'memory_mb': db_vm.memory_mb,
-            'disk_size_gb': db_vm.disk_size_gb,
-            'operating_system': db_vm.operating_system,
-            'power_state': db_vm.power_state,
-            'created_at': db_vm.created_at.isoformat()
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to add VM manually: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to add VM: {str(e)}")
-
-@app.post("/api/v1/discovery/network")
-async def discover_network_range(
-    discovery_data: dict,
-    db: Session = Depends(get_db)
-):
-    """Discover devices on network range"""
-    try:
-        network_range = discovery_data.get('network_range', '192.168.1.0/24')
-        logger.info(f"Discovering devices in network range: {network_range}")
-        
-        # Use Ubuntu network discovery as it's the most generic
-        ubuntu_connector = connectors.get('ubuntu')
-        if ubuntu_connector:
-            discovered = await ubuntu_connector.discover_ubuntu_machines(network_range)
-            
-            # Enhanced discovery - try to detect platform types
-            enhanced_devices = []
-            for device in discovered:
-                enhanced_device = device.copy()
-                
-                # Try to detect platform based on open ports and services
-                ip = device.get('ip')
-                if ip:
-                    try:
-                        import socket
-                        
-                        # Check for common virtualization platform ports
-                        platform_ports = {
-                            443: 'vmware',  # vCenter/ESXi HTTPS
-                            902: 'vmware',  # VMware Auth
-                            8006: 'proxmox',  # Proxmox Web UI
-                            80: 'xcpng',    # XCP-ng Web UI (also check for specific headers)
-                            22: 'ubuntu'    # SSH (Ubuntu/Linux)
-                        }
-                        
-                        open_ports = []
-                        detected_platform = 'unknown'
-                        
-                        for port, platform in platform_ports.items():
-                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            sock.settimeout(2)
-                            result = sock.connect_ex((ip, port))
-                            if result == 0:
-                                open_ports.append(port)
-                                if detected_platform == 'unknown':
-                                    detected_platform = platform
-                            sock.close()
-                        
-                        enhanced_device['open_ports'] = open_ports
-                        enhanced_device['platform'] = detected_platform
-                        
-                    except Exception as scan_error:
-                        logger.warning(f"Port scan failed for {ip}: {scan_error}")
-                        enhanced_device['platform'] = 'unknown'
-                        enhanced_device['open_ports'] = []
-                
-                enhanced_devices.append(enhanced_device)
-            
-            return {
-                'network_range': network_range,
-                'discovered_count': len(enhanced_devices),
-                'discovered': enhanced_devices
-            }
-        
-        return {
-            'network_range': network_range,
-            'discovered_count': 0,
-            'discovered': []
-        }
-        
-    except Exception as e:
-        logger.error(f"Network discovery failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Network discovery failed: {str(e)}")
-
-@app.post("/api/v1/platforms/{platform_type}/refresh")
-async def refresh_platform_vms(
-    platform_type: PlatformType,
-    db: Session = Depends(get_db)
-):
-    """Refresh VM list for a specific platform"""
-    try:
-        connector = connectors.get(platform_type)
-        if not connector:
-            raise HTTPException(status_code=400, detail=f"Platform {platform_type} not supported")
-        
-        if not connector.connected:
-            raise HTTPException(status_code=400, detail=f"Not connected to {platform_type}")
-        
-        vms = await connector.list_vms()
-        
-        # Update database with discovered VMs
-        for vm_data in vms:
-            existing_vm = db.query(VirtualMachine).filter(
-                VirtualMachine.vm_id == vm_data['vm_id'],
-                VirtualMachine.platform == platform_type
-            ).first()
-            
-            if existing_vm:
-                # Update existing VM
-                existing_vm.name = vm_data['name']
-                existing_vm.host = vm_data['host']
-                existing_vm.cpu_count = vm_data['cpu_count']
-                existing_vm.memory_mb = vm_data['memory_mb']
-                existing_vm.disk_size_gb = vm_data['disk_size_gb']
-                existing_vm.operating_system = vm_data['operating_system']
-                existing_vm.power_state = vm_data['power_state']
-                existing_vm.updated_at = datetime.now()
-            else:
-                # Create new VM record
-                new_vm = VirtualMachine(
-                    vm_id=vm_data['vm_id'],
-                    name=vm_data['name'],
-                    platform=platform_type,
-                    host=vm_data['host'],
-                    cpu_count=vm_data['cpu_count'],
-                    memory_mb=vm_data['memory_mb'],
-                    disk_size_gb=vm_data['disk_size_gb'],
-                    operating_system=vm_data['operating_system'],
-                    power_state=vm_data['power_state']
-                )
-                db.add(new_vm)
-        
-        db.commit()
-        
-        return {
-            'platform': platform_type.value,
-            'vms_discovered': len(vms),
-            'vms': vms
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to refresh VMs for {platform_type}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/backup-jobs")
@@ -793,6 +634,9 @@ async def list_backup_jobs(
                 "backup_type": job.backup_type.value,
                 "status": job.status.value,
                 "schedule_cron": job.schedule_cron,
+                "retention_days": job.retention_days,
+                "compression_enabled": job.compression_enabled,
+                "encryption_enabled": job.encryption_enabled,
                 "last_run": job.last_run.isoformat() if job.last_run else None,
                 "next_run": job.next_run.isoformat() if job.next_run else None,
                 "created_at": job.created_at.isoformat()
@@ -801,36 +645,6 @@ async def list_backup_jobs(
         ]
     except Exception as e:
         logger.error(f"Error listing backup jobs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/backup-jobs/{job_id}")
-async def get_backup_job(
-    job_id: int,
-    db: Session = Depends(get_db)
-) -> dict:
-    """Get specific backup job details"""
-    try:
-        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
-        if not job:
-            raise HTTPException(status_code=404, detail="Backup job not found")
-        
-        return {
-            "id": job.id,
-            "name": job.name,
-            "description": job.description,
-            "vm_id": job.vm_id,
-            "platform": job.platform.value,
-            "backup_type": job.backup_type.value,
-            "status": job.status.value,
-            "schedule_cron": job.schedule_cron,
-            "last_run": job.last_run.isoformat() if job.last_run else None,
-            "next_run": job.next_run.isoformat() if job.next_run else None,
-            "created_at": job.created_at.isoformat()
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/backup-jobs/{job_id}/run")
@@ -846,6 +660,7 @@ async def run_backup_job(
             raise HTTPException(status_code=404, detail="Backup job not found")
         
         # Add backup task to background
+        backup_engine = app.state.backup_engine
         background_tasks.add_task(backup_engine.run_backup, job)
         
         # Update job status
@@ -853,6 +668,7 @@ async def run_backup_job(
         job.last_run = datetime.now()
         db.commit()
         
+        logger.info(f"Started backup job: {job.name}")
         return {"message": "Backup job started", "job_id": job_id}
     except HTTPException:
         raise
@@ -875,9 +691,11 @@ async def delete_backup_job(
         if hasattr(app.state, 'scheduler'):
             app.state.scheduler.remove_job(job_id)
         
+        job_name = job.name
         db.delete(job)
         db.commit()
         
+        logger.info(f"Deleted backup job: {job_name}")
         return {"message": "Backup job deleted"}
     except HTTPException:
         raise
@@ -885,57 +703,51 @@ async def delete_backup_job(
         logger.error(f"Error deleting backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Recovery Endpoints
-@app.post("/api/v1/recovery/instant-restore")
-async def instant_restore(
-    backup_id: str,
-    target_platform: PlatformType,
-    restore_config: dict,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    """Perform instant VM restore"""
-    try:
-        # Add restore task to background
-        background_tasks.add_task(
-            backup_engine.instant_restore,
-            backup_id,
-            target_platform,
-            restore_config
-        )
-        
-        return {
-            "message": "Instant restore initiated",
-            "backup_id": backup_id,
-            "estimated_time": "15 seconds"
-        }
-    except Exception as e:
-        logger.error(f"Error starting instant restore: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Statistics and Monitoring
+# UPDATED: Statistics with real data
 @app.get("/api/v1/statistics")
 async def get_statistics(db: Session = Depends(get_db)):
-    """Get backup system statistics"""
+    """Get backup system statistics from database"""
     try:
+        total_vms = db.query(VirtualMachine).count()
         total_jobs = db.query(BackupJob).count()
         running_jobs = db.query(BackupJob).filter(
             BackupJob.status == BackupJobStatus.RUNNING
         ).count()
         
+        # Calculate recent jobs (last 24 hours)
+        yesterday = datetime.now() - timedelta(days=1)
+        recent_jobs = db.query(BackupJob).filter(
+            BackupJob.last_run >= yesterday
+        ).count()
+        
+        # Calculate success rate (simplified)
+        completed_jobs = db.query(BackupJob).filter(
+            BackupJob.status == BackupJobStatus.COMPLETED
+        ).count()
+        
+        if total_jobs > 0:
+            success_rate = f"{(completed_jobs / total_jobs) * 100:.1f}%"
+        else:
+            success_rate = "N/A"
+        
+        # Get platform connection status
+        platform_status = getattr(app.state, 'platform_status', {})
+        connected_platforms = sum(platform_status.values())
+        
         return {
             "total_backup_jobs": total_jobs,
             "running_jobs": running_jobs,
-            "total_vms_protected": 0,  # Calculate from actual data
-            "total_backups_size": "0 GB",  # Calculate from storage
-            "last_24h_jobs": 0,  # Calculate from recent jobs
-            "success_rate": "99.5%"  # Calculate from job history
+            "total_vms_protected": total_vms,
+            "connected_platforms": connected_platforms,
+            "total_backups_size": "0 GB",  # TODO: Calculate from actual backups
+            "last_24h_jobs": recent_jobs,
+            "success_rate": success_rate
         }
     except Exception as e:
         logger.error(f"Error getting statistics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Authentication Endpoints
+# Authentication endpoints (keeping existing...)
 @app.post("/api/v1/auth/register")
 async def register_user(
     user_data: UserCreate,
@@ -1038,126 +850,6 @@ async def get_current_user_info(
         "created_at": current_user.created_at.isoformat(),
         "last_login": current_user.last_login.isoformat() if current_user.last_login else None
     }
-
-# Ubuntu Machine Management Endpoints
-@app.post("/api/v1/ubuntu/discover")
-async def discover_ubuntu_machines(
-    network_range: str = "192.168.1.0/24",
-    current_user: User = Depends(get_current_user)
-):
-    """Discover Ubuntu machines on the network"""
-    try:
-        machines = await UbuntuNetworkDiscovery.scan_network_range(network_range)
-        return {
-            "network_range": network_range,
-            "discovered_count": len(machines),
-            "machines": machines
-        }
-    except Exception as e:
-        logger.error(f"Error discovering Ubuntu machines: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ubuntu/connect")
-async def connect_ubuntu_machine(
-    connection_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Connect to Ubuntu machine"""
-    try:
-        connector = connectors['ubuntu']
-        success = await connector.connect(connection_data)
-        
-        if success:
-            return {"status": "connected", "ip": connection_data.get('ip')}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to connect to Ubuntu machine")
-            
-    except Exception as e:
-        logger.error(f"Error connecting to Ubuntu machine: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/ubuntu/machines")
-async def get_ubuntu_machines(
-    current_user: User = Depends(get_current_user)
-) -> List[dict]:
-    """Get list of connected Ubuntu machines"""
-    try:
-        connector = connectors['ubuntu']
-        machines = await connector.list_vms()
-        return machines
-    except Exception as e:
-        logger.error(f"Error getting Ubuntu machines: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ubuntu/{machine_id}/backup")
-async def backup_ubuntu_machine(
-    machine_id: str,
-    backup_config: dict,
-    background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user)
-):
-    """Start backup of Ubuntu machine"""
-    try:
-        # Add backup task to background
-        background_tasks.add_task(
-            backup_ubuntu_machine_task,
-            machine_id,
-            backup_config,
-            current_user.id
-        )
-        
-        return {
-            "message": "Ubuntu machine backup started",
-            "machine_id": machine_id
-        }
-    except Exception as e:
-        logger.error(f"Error starting Ubuntu backup: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ubuntu/{machine_id}/install-agent")
-async def install_ubuntu_agent(
-    machine_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Install backup agent on Ubuntu machine"""
-    try:
-        connector = connectors['ubuntu']
-        ip = machine_id.replace('ubuntu-', '')
-        
-        if ip in connector.ssh_connections:
-            from ubuntu_backup import UbuntuBackupAgent
-            ssh_client = connector.ssh_connections[ip]
-            success = await UbuntuBackupAgent.install_agent(ip, ssh_client)
-            
-            if success:
-                return {"message": "Backup agent installed successfully", "machine_id": machine_id}
-            else:
-                raise HTTPException(status_code=500, detail="Failed to install backup agent")
-        else:
-            raise HTTPException(status_code=400, detail="Machine not connected")
-            
-    except Exception as e:
-        logger.error(f"Error installing Ubuntu agent: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Background task functions
-async def backup_ubuntu_machine_task(machine_id: str, backup_config: dict, user_id: int):
-    """Background task to backup Ubuntu machine"""
-    try:
-        connector = connectors['ubuntu']
-        
-        # Create backup directory
-        backup_dir = f"./backups/ubuntu/{machine_id}"
-        
-        # Perform backup
-        result = await connector.export_vm(machine_id, backup_dir)
-        
-        logger.info(f"Ubuntu machine backup completed: {result}")
-        
-        # TODO: Save backup record to database
-        
-    except Exception as e:
-        logger.error(f"Ubuntu machine backup failed: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(
