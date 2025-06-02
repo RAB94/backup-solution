@@ -1,5 +1,3 @@
-// Updated App.tsx with Storage Management Tab - PRODUCTION READY
-
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { 
   Server, 
@@ -32,10 +30,24 @@ import {
   CheckCircle2,
   XCircle,
   Wifi,
-  Trash2
+  Trash2,
+  User,
+  UserPlus,
+  AlertCircle,
+  Mail,
+  Bell,
+  Calendar,
+  BarChart3,
+  PieChart,
+  TrendingUp,
+  Save,
+  Copy,
+  Play,
+  Pause
 } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart as RechartsPieChart, Cell, BarChart, Bar } from 'recharts';
 
-// Types (keeping existing types and adding storage types...)
+// Types (complete interface definitions)
 interface User {
   id: number;
   username: string;
@@ -54,6 +66,7 @@ interface AuthContextType {
   register: (userData: any) => Promise<boolean>;
   logout: () => void;
   isAuthenticated: boolean;
+  isLoading: boolean;
 }
 
 interface VM {
@@ -76,6 +89,7 @@ interface BackupJob {
   name: string;
   description: string;
   vm_id: string;
+  vm_name?: string;
   platform: 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu';
   backup_type: 'full' | 'incremental' | 'differential';
   schedule_cron: string;
@@ -83,6 +97,10 @@ interface BackupJob {
   last_run: string | null;
   next_run: string | null;
   created_at: string;
+  retention_days: number;
+  compression_enabled: boolean;
+  encryption_enabled: boolean;
+  current_status?: any;
 }
 
 interface Backup {
@@ -113,7 +131,6 @@ interface RestoreHistoryItem {
   metadata?: any;
 }
 
-// NEW: Storage Backend Types
 interface StorageBackend {
   id: string;
   name: string;
@@ -126,25 +143,22 @@ interface StorageBackend {
     message?: string;
     available_gb?: number;
     total_gb?: number;
+    write_speed_mbps?: number;
+    usage_percent?: number;
   };
   is_default: boolean;
+  backup_count?: number;
 }
 
 interface StorageBackendConfig {
   name: string;
   storage_type: 'local' | 'nfs' | 'iscsi';
   capacity_gb: number;
-  
-  // Local storage config
   path?: string;
-  
-  // NFS storage config
   server?: string;
   remote_path?: string;
   mount_options?: string;
   local_mount_point?: string;
-  
-  // iSCSI storage config
   target_ip?: string;
   target_port?: number;
   target_iqn?: string;
@@ -153,15 +167,66 @@ interface StorageBackendConfig {
   password?: string;
 }
 
+// NEW: Analytics and Notification Types
+interface StorageAnalytics {
+  usage_over_time: Array<{
+    date: string;
+    total_gb: number;
+    used_gb: number;
+    available_gb: number;
+  }>;
+  backup_size_trends: Array<{
+    date: string;
+    size_gb: number;
+    count: number;
+  }>;
+  platform_distribution: Array<{
+    platform: string;
+    count: number;
+    size_gb: number;
+  }>;
+  storage_backend_usage: Array<{
+    name: string;
+    used_gb: number;
+    available_gb: number;
+    usage_percent: number;
+  }>;
+}
+
+interface NotificationSettings {
+  email_enabled: boolean;
+  email_addresses: string[];
+  smtp_server?: string;
+  smtp_port?: number;
+  smtp_username?: string;
+  smtp_password?: string;
+  smtp_ssl?: boolean;
+  webhook_enabled: boolean;
+  webhook_url?: string;
+  slack_enabled: boolean;
+  slack_webhook?: string;
+  notifications: {
+    backup_success: boolean;
+    backup_failure: boolean;
+    storage_warning: boolean;
+    platform_disconnect: boolean;
+    job_completion: boolean;
+  };
+}
+
 type PlatformType = 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu';
 
 interface DashboardStats {
   total_backup_jobs: number;
   running_jobs: number;
   total_vms_protected: number;
+  connected_platforms: number;
   total_backups_size: string;
   last_24h_jobs: number;
   success_rate: string;
+  storage_backends: number;
+  storage_capacity_gb: number;
+  storage_available_gb: number;
 }
 
 interface PlatformStatus {
@@ -171,21 +236,18 @@ interface PlatformStatus {
   ubuntu: boolean;
 }
 
-// API Service with storage methods
+// Enhanced API Service
 class APIService {
   private baseURL: string;
   private authToken: string | null = null;
 
   constructor() {
-    // Determine API URL based on current host
     const currentHost = window.location.hostname;
     if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
       this.baseURL = 'http://localhost:8000/api/v1';
     } else {
-      // Use the same IP as the frontend but port 8000 for API
       this.baseURL = `http://${currentHost}:8000/api/v1`;
     }
-    
     console.log('API Base URL:', this.baseURL);
   }
 
@@ -236,7 +298,7 @@ class APIService {
     }
   }
 
-  // Authentication methods (keeping existing...)
+  // Authentication methods
   async login(username: string, password: string) {
     return this.request('/auth/login', {
       method: 'POST',
@@ -261,7 +323,7 @@ class APIService {
     return this.request('/auth/me');
   }
 
-  // Backup Jobs methods (keeping existing...)
+  // Backup Jobs methods
   async getBackupJobs(): Promise<BackupJob[]> {
     return this.request('/backup-jobs');
   }
@@ -304,7 +366,7 @@ class APIService {
     return this.request('/platforms/status');
   }
 
-  // Backup and Restore methods (keeping existing...)
+  // Backup and Restore methods
   async getAllBackups(): Promise<Backup[]> {
     return this.request('/storage/backups');
   }
@@ -336,7 +398,7 @@ class APIService {
     });
   }
 
-  // NEW: Storage Backend Methods
+  // Storage Backend Methods
   async getStorageBackends(): Promise<StorageBackend[]> {
     return this.request('/storage/backends');
   }
@@ -385,6 +447,33 @@ class APIService {
     });
   }
 
+  // NEW: Analytics Methods
+  async getStorageAnalytics(): Promise<StorageAnalytics> {
+    return this.request('/analytics/storage');
+  }
+
+  async getBackupTrends(days: number = 30) {
+    return this.request(`/analytics/backup-trends?days=${days}`);
+  }
+
+  // NEW: Notification Settings Methods
+  async getNotificationSettings(): Promise<NotificationSettings> {
+    return this.request('/settings/notifications');
+  }
+
+  async updateNotificationSettings(settings: NotificationSettings) {
+    return this.request('/settings/notifications', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    });
+  }
+
+  async testNotifications() {
+    return this.request('/settings/notifications/test', {
+      method: 'POST',
+    });
+  }
+
   async installUbuntuAgent(vmId: string) {
     return this.request(`/ubuntu/${vmId}/install-agent`, {
       method: 'POST',
@@ -394,50 +483,68 @@ class APIService {
 
 const api = new APIService();
 
-// Authentication Context (keeping existing...)
+// Authentication Context
 const AuthContext = createContext<AuthContextType | null>(null);
 
 const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (token) {
-      api.setAuthToken(token);
-      api.getCurrentUser()
-        .then((userData: User) => setUser(userData))
-        .catch(() => {
+    const initializeAuth = async () => {
+      if (token) {
+        api.setAuthToken(token);
+        try {
+          const userData = await api.getCurrentUser();
+          setUser(userData);
+        } catch (error) {
+          console.error('Failed to get current user:', error);
           localStorage.removeItem('token');
           setToken(null);
-        });
-    }
+          api.setAuthToken(null);
+        }
+      }
+      setIsLoading(false);
+    };
+
+    initializeAuth();
   }, [token]);
 
   const login = async (username: string, password: string): Promise<boolean> => {
     try {
+      setIsLoading(true);
       const response = await api.login(username, password);
-      setToken(response.access_token);
-      localStorage.setItem('token', response.access_token);
-      api.setAuthToken(response.access_token);
       
-      const userData = await api.getCurrentUser();
-      setUser(userData);
-      return true;
+      if (response.access_token) {
+        setToken(response.access_token);
+        localStorage.setItem('token', response.access_token);
+        api.setAuthToken(response.access_token);
+        
+        const userData = await api.getCurrentUser();
+        setUser(userData);
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Login failed:', error);
       return false;
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const register = async (userData: any): Promise<boolean> => {
-    console.log('Starting registration process:', userData);
     try {
+      setIsLoading(true);
       const response = await api.register(userData);
       console.log('Registration successful:', response);
       return true;
     } catch (error) {
       console.error('Registration failed:', error);
       return false;
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -455,7 +562,8 @@ const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => 
       login,
       register,
       logout,
-      isAuthenticated: !!user
+      isAuthenticated: !!user,
+      isLoading
     }}>
       {children}
     </AuthContext.Provider>
@@ -470,7 +578,7 @@ const useAuth = () => {
   return context;
 };
 
-// UI Components (keeping existing Card, Button, Modal, StatusIndicator, MetricCard...)
+// UI Components
 const Card: React.FC<{
   children: React.ReactNode;
   className?: string;
@@ -492,7 +600,8 @@ const Button: React.FC<{
   variant?: 'primary' | 'secondary' | 'danger' | 'success';
   size?: 'sm' | 'md' | 'lg';
   disabled?: boolean;
-}> = ({ children, onClick, variant = 'primary', size = 'md', disabled = false }) => {
+  type?: 'button' | 'submit' | 'reset';
+}> = ({ children, onClick, variant = 'primary', size = 'md', disabled = false, type = 'button' }) => {
   const variants = {
     primary: 'bg-blue-600 hover:bg-blue-500 text-white border-blue-600',
     secondary: 'bg-slate-600 hover:bg-slate-500 text-white border-slate-600',
@@ -508,6 +617,7 @@ const Button: React.FC<{
 
   return (
     <button
+      type={type}
       onClick={onClick}
       disabled={disabled}
       className={`
@@ -570,13 +680,15 @@ const StatusIndicator: React.FC<{
       case 'healthy':
       case 'mounted':
       case 'poweredon':
-        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'HEALTHY' };
+      case 'online':
       case 'running':
+        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'HEALTHY' };
       case 'in progress':
         return { color: 'text-amber-400', bg: 'bg-amber-400', label: 'RUNNING' };
       case 'failed':
       case 'error':
       case 'unmounted':
+      case 'offline':
         return { color: 'text-red-400', bg: 'bg-red-400', label: 'ERROR' };
       case 'pending':
       case 'scheduled':
@@ -630,7 +742,1309 @@ const MetricCard: React.FC<{
   </Card>
 );
 
-// NEW: Storage Backend Configuration Modal
+// NEW: Cron Expression Builder Component
+const CronExpressionBuilder: React.FC<{
+  value: string;
+  onChange: (cronExpression: string) => void;
+  onClose: () => void;
+}> = ({ value, onChange, onClose }) => {
+  const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
+  const [customCron, setCustomCron] = useState(value);
+  const [cronParts, setCronParts] = useState({
+    minute: '*',
+    hour: '*',
+    day: '*',
+    month: '*',
+    weekday: '*'
+  });
+
+  const presets = [
+    { label: 'Every minute', value: '* * * * *', description: 'Runs every minute (for testing)' },
+    { label: 'Every 5 minutes', value: '*/5 * * * *', description: 'Runs every 5 minutes' },
+    { label: 'Every 15 minutes', value: '*/15 * * * *', description: 'Runs every 15 minutes' },
+    { label: 'Every 30 minutes', value: '*/30 * * * *', description: 'Runs every 30 minutes' },
+    { label: 'Hourly', value: '0 * * * *', description: 'Runs at the start of every hour' },
+    { label: 'Every 2 hours', value: '0 */2 * * *', description: 'Runs every 2 hours' },
+    { label: 'Every 6 hours', value: '0 */6 * * *', description: 'Runs every 6 hours at :00' },
+    { label: 'Daily at midnight', value: '0 0 * * *', description: 'Runs once a day at 00:00' },
+    { label: 'Daily at 2 AM', value: '0 2 * * *', description: 'Runs once a day at 02:00' },
+    { label: 'Daily at 6 AM', value: '0 6 * * *', description: 'Runs once a day at 06:00' },
+    { label: 'Weekly (Sunday)', value: '0 2 * * 0', description: 'Runs every Sunday at 02:00' },
+    { label: 'Weekly (Monday)', value: '0 2 * * 1', description: 'Runs every Monday at 02:00' },
+    { label: 'Monthly (1st)', value: '0 2 1 * *', description: 'Runs on the 1st of every month at 02:00' },
+    { label: 'Workdays at 9 AM', value: '0 9 * * 1-5', description: 'Runs Mon-Fri at 09:00' },
+    { label: 'Weekends at 10 AM', value: '0 10 * * 6,0', description: 'Runs Sat-Sun at 10:00' }
+  ];
+
+  const minuteOptions = ['*', '0', '15', '30', '45'];
+  const hourOptions = ['*', '0', '1', '2', '6', '12', '18'];
+  const dayOptions = ['*', '1', '15'];
+  const monthOptions = ['*', '1', '6'];
+  const weekdayOptions = ['*', '0', '1', '6'];
+
+  const weekdayLabels: { [key: string]: string } = {
+    '*': 'Every day',
+    '0': 'Sunday',
+    '1': 'Monday',
+    '2': 'Tuesday',
+    '3': 'Wednesday',
+    '4': 'Thursday',
+    '5': 'Friday',
+    '6': 'Saturday',
+    '1-5': 'Weekdays',
+    '6,0': 'Weekends'
+  };
+
+  const buildCronFromParts = () => {
+    return `${cronParts.minute} ${cronParts.hour} ${cronParts.day} ${cronParts.month} ${cronParts.weekday}`;
+  };
+
+  const parseCronExpression = (cron: string) => {
+    const parts = cron.split(' ');
+    if (parts.length === 5) {
+      setCronParts({
+        minute: parts[0],
+        hour: parts[1],
+        day: parts[2],
+        month: parts[3],
+        weekday: parts[4]
+      });
+    }
+  };
+
+  const handlePresetSelect = (cronValue: string) => {
+    onChange(cronValue);
+    setCustomCron(cronValue);
+    parseCronExpression(cronValue);
+  };
+
+  const handleCustomCronChange = (newCron: string) => {
+    setCustomCron(newCron);
+    parseCronExpression(newCron);
+  };
+
+  const handlePartChange = (part: keyof typeof cronParts, value: string) => {
+    const newParts = { ...cronParts, [part]: value };
+    setCronParts(newParts);
+    const newCron = `${newParts.minute} ${newParts.hour} ${newParts.day} ${newParts.month} ${newParts.weekday}`;
+    setCustomCron(newCron);
+  };
+
+  const handleSave = () => {
+    onChange(customCron);
+    onClose();
+  };
+
+  const getNextRunTimes = (cron: string) => {
+    // This is a simplified version - in production you'd use a proper cron parser
+    const now = new Date();
+    const times = [];
+    
+    // Mock next run times for demonstration
+    for (let i = 1; i <= 3; i++) {
+      const nextTime = new Date(now.getTime() + (i * 24 * 60 * 60 * 1000));
+      times.push(nextTime.toLocaleString());
+    }
+    
+    return times;
+  };
+
+  useEffect(() => {
+    parseCronExpression(value);
+    setCustomCron(value);
+  }, [value]);
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title="Backup Schedule Builder" size="xl">
+      <div className="space-y-6">
+        {/* Tab Navigation */}
+        <div className="border-b border-slate-700">
+          <div className="flex space-x-8">
+            <button
+              onClick={() => setActiveTab('presets')}
+              className={`py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
+                activeTab === 'presets'
+                  ? 'border-blue-400 text-blue-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
+              }`}
+            >
+              Preset Schedules
+            </button>
+            <button
+              onClick={() => setActiveTab('custom')}
+              className={`py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
+                activeTab === 'custom'
+                  ? 'border-blue-400 text-blue-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
+              }`}
+            >
+              Custom Builder
+            </button>
+          </div>
+        </div>
+
+        {activeTab === 'presets' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-80 overflow-y-auto">
+              {presets.map((preset, index) => (
+                <div
+                  key={index}
+                  onClick={() => handlePresetSelect(preset.value)}
+                  className={`p-4 border rounded-lg cursor-pointer transition-all duration-200 ${
+                    customCron === preset.value
+                      ? 'border-blue-500 bg-blue-900 bg-opacity-30'
+                      : 'border-slate-600 hover:border-slate-500 bg-slate-700'
+                  }`}
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <h4 className="text-white font-medium">{preset.label}</h4>
+                    <code className="text-blue-400 text-xs font-mono bg-slate-800 px-2 py-1 rounded">
+                      {preset.value}
+                    </code>
+                  </div>
+                  <p className="text-slate-400 text-sm">{preset.description}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'custom' && (
+          <div className="space-y-6">
+            {/* Visual Cron Builder */}
+            <div className="bg-slate-700 rounded-lg p-4">
+              <h4 className="text-white font-medium mb-4">Visual Builder</h4>
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                <div>
+                  <label className="block text-slate-300 text-sm font-medium mb-2">Minute</label>
+                  <select
+                    value={cronParts.minute}
+                    onChange={(e) => handlePartChange('minute', e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm"
+                  >
+                    {minuteOptions.map(opt => (
+                      <option key={opt} value={opt}>
+                        {opt === '*' ? 'Every minute' : `Minute ${opt}`}
+                      </option>
+                    ))}
+                    <option value="*/5">Every 5 minutes</option>
+                    <option value="*/15">Every 15 minutes</option>
+                    <option value="*/30">Every 30 minutes</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 text-sm font-medium mb-2">Hour</label>
+                  <select
+                    value={cronParts.hour}
+                    onChange={(e) => handlePartChange('hour', e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm"
+                  >
+                    {hourOptions.map(opt => (
+                      <option key={opt} value={opt}>
+                        {opt === '*' ? 'Every hour' : `${opt}:00`}
+                      </option>
+                    ))}
+                    <option value="*/2">Every 2 hours</option>
+                    <option value="*/6">Every 6 hours</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 text-sm font-medium mb-2">Day</label>
+                  <select
+                    value={cronParts.day}
+                    onChange={(e) => handlePartChange('day', e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm"
+                  >
+                    {dayOptions.map(opt => (
+                      <option key={opt} value={opt}>
+                        {opt === '*' ? 'Every day' : `Day ${opt}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 text-sm font-medium mb-2">Month</label>
+                  <select
+                    value={cronParts.month}
+                    onChange={(e) => handlePartChange('month', e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm"
+                  >
+                    {monthOptions.map(opt => (
+                      <option key={opt} value={opt}>
+                        {opt === '*' ? 'Every month' : `Month ${opt}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 text-sm font-medium mb-2">Weekday</label>
+                  <select
+                    value={cronParts.weekday}
+                    onChange={(e) => handlePartChange('weekday', e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm"
+                  >
+                    {Object.entries(weekdayLabels).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Raw Cron Input */}
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">
+                Raw Cron Expression
+                <span className="text-slate-500 ml-2">(minute hour day month weekday)</span>
+              </label>
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={customCron}
+                  onChange={(e) => handleCustomCronChange(e.target.value)}
+                  className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white font-mono text-sm"
+                  placeholder="0 2 * * *"
+                />
+                <Button
+                  onClick={() => navigator.clipboard.writeText(customCron)}
+                  variant="secondary"
+                  size="sm"
+                >
+                  <Copy size={16} />
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Preview */}
+        <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-4">
+          <div className="flex items-center space-x-2 mb-3">
+            <Calendar className="text-blue-400" size={20} />
+            <h4 className="text-blue-300 font-medium">Schedule Preview</h4>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center space-x-2">
+              <span className="text-blue-300 text-sm font-medium">Expression:</span>
+              <code className="bg-slate-800 text-blue-400 px-2 py-1 rounded text-sm font-mono">
+                {customCron}
+              </code>
+            </div>
+            <div>
+              <span className="text-blue-300 text-sm font-medium">Next runs:</span>
+              <ul className="text-blue-200 text-sm ml-4 mt-1">
+                {getNextRunTimes(customCron).map((time, index) => (
+                  <li key={index}>• {time}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Cancel
+          </Button>
+          <Button onClick={handleSave} variant="primary">
+            <Save size={16} className="mr-2" />
+            Save Schedule
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// NEW: Storage Analytics Component
+const StorageAnalyticsModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+}> = ({ isOpen, onClose }) => {
+  const [analytics, setAnalytics] = useState<StorageAnalytics | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [timeRange, setTimeRange] = useState(30);
+
+  useEffect(() => {
+    if (isOpen) {
+      loadAnalytics();
+    }
+  }, [isOpen, timeRange]);
+
+  const loadAnalytics = async () => {
+    setLoading(true);
+    try {
+      // Mock data for demonstration
+      const mockAnalytics: StorageAnalytics = {
+        usage_over_time: [
+          { date: '2024-01-01', total_gb: 1000, used_gb: 250, available_gb: 750 },
+          { date: '2024-01-02', total_gb: 1000, used_gb: 300, available_gb: 700 },
+          { date: '2024-01-03', total_gb: 1000, used_gb: 350, available_gb: 650 },
+          { date: '2024-01-04', total_gb: 1000, used_gb: 400, available_gb: 600 },
+          { date: '2024-01-05', total_gb: 1000, used_gb: 450, available_gb: 550 },
+          { date: '2024-01-06', total_gb: 1000, used_gb: 500, available_gb: 500 },
+          { date: '2024-01-07', total_gb: 1000, used_gb: 550, available_gb: 450 },
+        ],
+        backup_size_trends: [
+          { date: '2024-01-01', size_gb: 25, count: 5 },
+          { date: '2024-01-02', size_gb: 30, count: 6 },
+          { date: '2024-01-03', size_gb: 28, count: 7 },
+          { date: '2024-01-04', size_gb: 35, count: 8 },
+          { date: '2024-01-05', size_gb: 40, count: 10 },
+          { date: '2024-01-06', size_gb: 45, count: 12 },
+          { date: '2024-01-07', size_gb: 50, count: 15 },
+        ],
+        platform_distribution: [
+          { platform: 'VMware', count: 12, size_gb: 240 },
+          { platform: 'Proxmox', count: 8, size_gb: 160 },
+          { platform: 'XCP-NG', count: 5, size_gb: 100 },
+          { platform: 'Ubuntu', count: 10, size_gb: 50 },
+        ],
+        storage_backend_usage: [
+          { name: 'Local Storage', used_gb: 300, available_gb: 700, usage_percent: 30 },
+          { name: 'NFS Share', used_gb: 150, available_gb: 350, usage_percent: 30 },
+          { name: 'iSCSI LUN', used_gb: 100, available_gb: 400, usage_percent: 20 },
+        ]
+      };
+      setAnalytics(mockAnalytics);
+    } catch (error) {
+      console.error('Failed to load analytics:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6'];
+
+  if (!isOpen) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Storage Analytics" size="xl">
+      <div className="space-y-6">
+        {/* Time Range Selector */}
+        <div className="flex justify-between items-center">
+          <h3 className="text-white font-medium">Analytics Overview</h3>
+          <select
+            value={timeRange}
+            onChange={(e) => setTimeRange(Number(e.target.value))}
+            className="px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm"
+          >
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <RefreshCw className="text-blue-400 animate-spin" size={48} />
+            <span className="text-slate-400 ml-4">Loading analytics...</span>
+          </div>
+        ) : analytics ? (
+          <div className="space-y-8">
+            {/* Storage Usage Over Time */}
+            <div className="bg-slate-700 rounded-lg p-4">
+              <h4 className="text-white font-medium mb-4 flex items-center">
+                <TrendingUp className="text-blue-400 mr-2" size={20} />
+                Storage Usage Trends
+              </h4>
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={analytics.usage_over_time}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis dataKey="date" stroke="#9ca3af" />
+                  <YAxis stroke="#9ca3af" />
+                  <Tooltip 
+                    contentStyle={{ 
+                      backgroundColor: '#1f2937', 
+                      border: '1px solid #374151',
+                      borderRadius: '6px'
+                    }}
+                  />
+                  <Legend />
+                  <Line 
+                    type="monotone" 
+                    dataKey="used_gb" 
+                    stroke="#3b82f6" 
+                    strokeWidth={2}
+                    name="Used (GB)"
+                  />
+                  <Line 
+                    type="monotone" 
+                    dataKey="available_gb" 
+                    stroke="#10b981" 
+                    strokeWidth={2}
+                    name="Available (GB)"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Platform Distribution */}
+              <div className="bg-slate-700 rounded-lg p-4">
+                <h4 className="text-white font-medium mb-4 flex items-center">
+                  <PieChart className="text-blue-400 mr-2" size={20} />
+                  Platform Distribution
+                </h4>
+                <ResponsiveContainer width="100%" height={250}>
+                  <RechartsPieChart>
+                    <Tooltip 
+                      contentStyle={{ 
+                        backgroundColor: '#1f2937', 
+                        border: '1px solid #374151',
+                        borderRadius: '6px'
+                      }}
+                    />
+                    <Legend />
+                    <RechartsPieChart
+                      data={analytics.platform_distribution}
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={80}
+                      fill="#8884d8"
+                      dataKey="count"
+                    >
+                      {analytics.platform_distribution.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      ))}
+                    </RechartsPieChart>
+                  </RechartsPieChart>
+                </ResponsiveContainer>
+                <div className="mt-4 space-y-2">
+                  {analytics.platform_distribution.map((item, index) => (
+                    <div key={item.platform} className="flex justify-between text-sm">
+                      <div className="flex items-center">
+                        <div 
+                          className="w-3 h-3 rounded-full mr-2"
+                          style={{ backgroundColor: COLORS[index % COLORS.length] }}
+                        />
+                        <span className="text-slate-300">{item.platform}</span>
+                      </div>
+                      <span className="text-white">{item.count} VMs ({item.size_gb}GB)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Storage Backend Usage */}
+              <div className="bg-slate-700 rounded-lg p-4">
+                <h4 className="text-white font-medium mb-4 flex items-center">
+                  <BarChart3 className="text-blue-400 mr-2" size={20} />
+                  Storage Backend Usage
+                </h4>
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart data={analytics.storage_backend_usage}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                    <XAxis dataKey="name" stroke="#9ca3af" />
+                    <YAxis stroke="#9ca3af" />
+                    <Tooltip 
+                      contentStyle={{ 
+                        backgroundColor: '#1f2937', 
+                        border: '1px solid #374151',
+                        borderRadius: '6px'
+                      }}
+                    />
+                    <Legend />
+                    <Bar dataKey="used_gb" fill="#3b82f6" name="Used (GB)" />
+                    <Bar dataKey="available_gb" fill="#10b981" name="Available (GB)" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Backup Size Trends */}
+            <div className="bg-slate-700 rounded-lg p-4">
+              <h4 className="text-white font-medium mb-4 flex items-center">
+                <Archive className="text-blue-400 mr-2" size={20} />
+                Daily Backup Trends
+              </h4>
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={analytics.backup_size_trends}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis dataKey="date" stroke="#9ca3af" />
+                  <YAxis yAxisId="left" stroke="#9ca3af" />
+                  <YAxis yAxisId="right" orientation="right" stroke="#9ca3af" />
+                  <Tooltip 
+                    contentStyle={{ 
+                      backgroundColor: '#1f2937', 
+                      border: '1px solid #374151',
+                      borderRadius: '6px'
+                    }}
+                  />
+                  <Legend />
+                  <Bar yAxisId="left" dataKey="size_gb" fill="#3b82f6" name="Total Size (GB)" />
+                  <Line yAxisId="right" type="monotone" dataKey="count" stroke="#f59e0b" strokeWidth={2} name="Backup Count" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Summary Stats */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="bg-slate-700 rounded-lg p-4 text-center">
+                <div className="text-blue-400 text-2xl font-bold">
+                  {analytics.usage_over_time[analytics.usage_over_time.length - 1]?.used_gb || 0}GB
+                </div>
+                <div className="text-slate-400 text-sm">Total Used</div>
+              </div>
+              <div className="bg-slate-700 rounded-lg p-4 text-center">
+                <div className="text-emerald-400 text-2xl font-bold">
+                  {analytics.backup_size_trends.reduce((sum, item) => sum + item.count, 0)}
+                </div>
+                <div className="text-slate-400 text-sm">Total Backups</div>
+              </div>
+              <div className="bg-slate-700 rounded-lg p-4 text-center">
+                <div className="text-yellow-400 text-2xl font-bold">
+                  {analytics.platform_distribution.reduce((sum, item) => sum + item.count, 0)}
+                </div>
+                <div className="text-slate-400 text-sm">Protected VMs</div>
+              </div>
+              <div className="bg-slate-700 rounded-lg p-4 text-center">
+                <div className="text-purple-400 text-2xl font-bold">
+                  {analytics.storage_backend_usage.length}
+                </div>
+                <div className="text-slate-400 text-sm">Storage Backends</div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-12">
+            <AlertTriangle className="text-yellow-400 mx-auto mb-4" size={48} />
+            <h3 className="text-white text-lg font-medium mb-2">No Analytics Data</h3>
+            <p className="text-slate-400">Analytics data will appear after creating backups</p>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <Button onClick={onClose} variant="primary">
+            Close
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// NEW: Notification Settings Component
+const NotificationSettingsModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+}> = ({ isOpen, onClose }) => {
+  const [settings, setSettings] = useState<NotificationSettings>({
+    email_enabled: false,
+    email_addresses: [''],
+    smtp_server: '',
+    smtp_port: 587,
+    smtp_username: '',
+    smtp_password: '',
+    smtp_ssl: true,
+    webhook_enabled: false,
+    webhook_url: '',
+    slack_enabled: false,
+    slack_webhook: '',
+    notifications: {
+      backup_success: true,
+      backup_failure: true,
+      storage_warning: true,
+      platform_disconnect: true,
+      job_completion: true,
+    }
+  });
+  const [loading, setLoading] = useState(true);
+  const [testing, setTesting] = useState(false);
+  const [activeTab, setActiveTab] = useState<'email' | 'webhook' | 'notifications'>('email');
+
+  useEffect(() => {
+    if (isOpen) {
+      loadSettings();
+    }
+  }, [isOpen]);
+
+  const loadSettings = async () => {
+    setLoading(true);
+    try {
+      const data = await api.getNotificationSettings();
+      setSettings(data);
+    } catch (error) {
+      console.error('Failed to load notification settings:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSave = async () => {
+    try {
+      await api.updateNotificationSettings(settings);
+      alert('✅ Notification settings saved successfully!');
+      onClose();
+    } catch (error) {
+      console.error('Failed to save notification settings:', error);
+      alert('❌ Failed to save notification settings');
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    try {
+      await api.testNotifications();
+      alert('✅ Test notification sent successfully!');
+    } catch (error) {
+      console.error('Failed to send test notification:', error);
+      alert('❌ Failed to send test notification');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const addEmailAddress = () => {
+    setSettings({
+      ...settings,
+      email_addresses: [...settings.email_addresses, '']
+    });
+  };
+
+  const removeEmailAddress = (index: number) => {
+    setSettings({
+      ...settings,
+      email_addresses: settings.email_addresses.filter((_, i) => i !== index)
+    });
+  };
+
+  const updateEmailAddress = (index: number, email: string) => {
+    const newEmails = [...settings.email_addresses];
+    newEmails[index] = email;
+    setSettings({
+      ...settings,
+      email_addresses: newEmails
+    });
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Notification Settings" size="xl">
+      <div className="space-y-6">
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <RefreshCw className="text-blue-400 animate-spin" size={48} />
+            <span className="text-slate-400 ml-4">Loading settings...</span>
+          </div>
+        ) : (
+          <>
+            {/* Tab Navigation */}
+            <div className="border-b border-slate-700">
+              <div className="flex space-x-8">
+                <button
+                  onClick={() => setActiveTab('email')}
+                  className={`py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
+                    activeTab === 'email'
+                      ? 'border-blue-400 text-blue-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-300'
+                  }`}
+                >
+                  <Mail className="inline mr-2" size={16} />
+                  Email
+                </button>
+                <button
+                  onClick={() => setActiveTab('webhook')}
+                  className={`py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
+                    activeTab === 'webhook'
+                      ? 'border-blue-400 text-blue-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-300'
+                  }`}
+                >
+                  <Network className="inline mr-2" size={16} />
+                  Webhooks
+                </button>
+                <button
+                  onClick={() => setActiveTab('notifications')}
+                  className={`py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
+                    activeTab === 'notifications'
+                      ? 'border-blue-400 text-blue-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-300'
+                  }`}
+                >
+                  <Bell className="inline mr-2" size={16} />
+                  Events
+                </button>
+              </div>
+            </div>
+
+            {/* Email Settings */}
+            {activeTab === 'email' && (
+              <div className="space-y-6">
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="checkbox"
+                    checked={settings.email_enabled}
+                    onChange={(e) => setSettings({...settings, email_enabled: e.target.checked})}
+                    className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                  />
+                  <label className="text-slate-300 text-sm font-medium">Enable Email Notifications</label>
+                </div>
+
+                {settings.email_enabled && (
+                  <div className="space-y-4">
+                    {/* Email Addresses */}
+                    <div>
+                      <label className="block text-slate-300 text-sm font-medium mb-2">
+                        Recipient Email Addresses
+                      </label>
+                      {settings.email_addresses.map((email, index) => (
+                        <div key={index} className="flex space-x-2 mb-2">
+                          <input
+                            type="email"
+                            value={email}
+                            onChange={(e) => updateEmailAddress(index, e.target.value)}
+                            className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                            placeholder="admin@company.com"
+                          />
+                          {settings.email_addresses.length > 1 && (
+                            <Button
+                              onClick={() => removeEmailAddress(index)}
+                              variant="danger"
+                              size="sm"
+                            >
+                              <X size={16} />
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                      <Button onClick={addEmailAddress} variant="secondary" size="sm">
+                        <Plus size={16} className="mr-1" />
+                        Add Email
+                      </Button>
+                    </div>
+
+                    {/* SMTP Configuration */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-slate-300 text-sm font-medium mb-2">SMTP Server</label>
+                        <input
+                          type="text"
+                          value={settings.smtp_server || ''}
+                          onChange={(e) => setSettings({...settings, smtp_server: e.target.value})}
+                          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                          placeholder="smtp.gmail.com"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 text-sm font-medium mb-2">SMTP Port</label>
+                        <input
+                          type="number"
+                          value={settings.smtp_port || 587}
+                          onChange={(e) => setSettings({...settings, smtp_port: parseInt(e.target.value)})}
+                          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+                        <input
+                          type="text"
+                          value={settings.smtp_username || ''}
+                          onChange={(e) => setSettings({...settings, smtp_username: e.target.value})}
+                          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                          placeholder="your-email@gmail.com"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+                        <input
+                          type="password"
+                          value={settings.smtp_password || ''}
+                          onChange={(e) => setSettings({...settings, smtp_password: e.target.value})}
+                          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                          placeholder="••••••••"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        checked={settings.smtp_ssl}
+                        onChange={(e) => setSettings({...settings, smtp_ssl: e.target.checked})}
+                        className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                      />
+                      <label className="text-slate-300 text-sm">Use SSL/TLS</label>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Webhook Settings */}
+            {activeTab === 'webhook' && (
+              <div className="space-y-6">
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="checkbox"
+                    checked={settings.webhook_enabled}
+                    onChange={(e) => setSettings({...settings, webhook_enabled: e.target.checked})}
+                    className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                  />
+                  <label className="text-slate-300 text-sm font-medium">Enable Generic Webhook</label>
+                </div>
+
+                {settings.webhook_enabled && (
+                  <div>
+                    <label className="block text-slate-300 text-sm font-medium mb-2">Webhook URL</label>
+                    <input
+                      type="url"
+                      value={settings.webhook_url || ''}
+                      onChange={(e) => setSettings({...settings, webhook_url: e.target.value})}
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                      placeholder="https://your-server.com/webhook"
+                    />
+                  </div>
+                )}
+
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="checkbox"
+                    checked={settings.slack_enabled}
+                    onChange={(e) => setSettings({...settings, slack_enabled: e.target.checked})}
+                    className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                  />
+                  <label className="text-slate-300 text-sm font-medium">Enable Slack Notifications</label>
+                </div>
+
+                {settings.slack_enabled && (
+                  <div>
+                    <label className="block text-slate-300 text-sm font-medium mb-2">Slack Webhook URL</label>
+                    <input
+                      type="url"
+                      value={settings.slack_webhook || ''}
+                      onChange={(e) => setSettings({...settings, slack_webhook: e.target.value})}
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400"
+                      placeholder="https://hooks.slack.com/services/..."
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Notification Events */}
+            {activeTab === 'notifications' && (
+              <div className="space-y-4">
+                <h4 className="text-white font-medium">Choose which events trigger notifications:</h4>
+                
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-slate-300 font-medium">Backup Success</label>
+                      <p className="text-slate-400 text-sm">Notify when backups complete successfully</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.notifications.backup_success}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        notifications: {...settings.notifications, backup_success: e.target.checked}
+                      })}
+                      className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-slate-300 font-medium">Backup Failure</label>
+                      <p className="text-slate-400 text-sm">Notify when backups fail or encounter errors</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.notifications.backup_failure}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        notifications: {...settings.notifications, backup_failure: e.target.checked}
+                      })}
+                      className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-slate-300 font-medium">Storage Warnings</label>
+                      <p className="text-slate-400 text-sm">Notify when storage space is running low</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.notifications.storage_warning}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        notifications: {...settings.notifications, storage_warning: e.target.checked}
+                      })}
+                      className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-slate-300 font-medium">Platform Disconnect</label>
+                      <p className="text-slate-400 text-sm">Notify when platform connections are lost</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.notifications.platform_disconnect}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        notifications: {...settings.notifications, platform_disconnect: e.target.checked}
+                      })}
+                      className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-slate-300 font-medium">Job Completion</label>
+                      <p className="text-slate-400 text-sm">Notify when scheduled backup jobs complete</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.notifications.job_completion}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        notifications: {...settings.notifications, job_completion: e.target.checked}
+                      })}
+                      className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Test Notification */}
+            <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-blue-300 font-medium">Test Notifications</h4>
+                  <p className="text-blue-200 text-sm">Send a test notification to verify your settings</p>
+                </div>
+                <Button
+                  onClick={handleTest}
+                  disabled={testing || (!settings.email_enabled && !settings.webhook_enabled && !settings.slack_enabled)}
+                  variant="secondary"
+                >
+                  {testing ? (
+                    <>
+                      <RefreshCw size={16} className="mr-2 animate-spin" />
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <Bell size={16} className="mr-2" />
+                      Send Test
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end space-x-3">
+              <Button onClick={onClose} variant="secondary">
+                Cancel
+              </Button>
+              <Button onClick={handleSave} variant="primary">
+                <Save size={16} className="mr-2" />
+                Save Settings
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+};
+
+// Enhanced Login Form Component
+const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { login } = useAuth();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    setError('');
+    
+    if (!username || !password) {
+      setError('Please enter both username and password');
+      setIsSubmitting(false);
+      return;
+    }
+    
+    try {
+      const success = await login(username, password);
+      
+      if (success) {
+        onClose();
+      } else {
+        setError('Invalid credentials');
+      }
+    } catch (err: any) {
+      setError('Login failed. Please check your connection and try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      {error && (
+        <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm flex items-center">
+          <AlertCircle size={16} className="mr-2" />
+          {error}
+        </div>
+      )}
+
+      <div>
+        <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+        <input
+          type="text"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+          placeholder="Enter username"
+          disabled={isSubmitting}
+          autoFocus
+        />
+      </div>
+
+      <div>
+        <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+          placeholder="Enter password"
+          disabled={isSubmitting}
+        />
+      </div>
+
+      <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
+        <p className="text-blue-300 text-sm">
+          <strong>Default Credentials:</strong><br/>
+          Username: admin<br/>
+          Password: admin123
+        </p>
+      </div>
+
+      <div className="flex justify-end space-x-3">
+        <Button onClick={onClose} variant="secondary" disabled={isSubmitting} type="button">
+          Cancel
+        </Button>
+        <Button variant="primary" disabled={isSubmitting} type="submit">
+          {isSubmitting ? (
+            <>
+              <RefreshCw size={16} className="mr-2 animate-spin" />
+              Logging in...
+            </>
+          ) : (
+            <>
+              <LogIn size={16} className="mr-2" />
+              Login
+            </>
+          )}
+        </Button>
+      </div>
+    </form>
+  );
+};
+
+// Registration Form
+const RegisterForm = ({ onClose, onSwitchToLogin }) => {
+  const [formData, setFormData] = useState({
+    username: '',
+    email: '',
+    full_name: '',
+    password: '',
+    confirm_password: '',
+    role: 'viewer'
+  });
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    setIsSubmitting(true);
+    setError('');
+    
+    if (!formData.username || !formData.email || !formData.full_name || !formData.password) {
+      setError('Please fill in all required fields');
+      setIsSubmitting(false);
+      return;
+    }
+
+    if (formData.password !== formData.confirm_password) {
+      setError('Passwords do not match');
+      setIsSubmitting(false);
+      return;
+    }
+
+    if (formData.password.length < 6) {
+      setError('Password must be at least 6 characters long');
+      setIsSubmitting(false);
+      return;
+    }
+    
+    try {
+      // Simulate API call - replace with actual register call
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      setSuccess(true);
+      setTimeout(() => {
+        onSwitchToLogin();
+      }, 2000);
+    } catch (err) {
+      setError('Registration failed. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  if (success) {
+    return (
+      <div className="text-center space-y-4">
+        <CheckCircle className="text-emerald-400 mx-auto" size={48} />
+        <h3 className="text-white text-lg font-medium">Registration Successful!</h3>
+        <p className="text-slate-300">Your account has been created. Redirecting to login...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {error && (
+        <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm flex items-center">
+          <AlertCircle size={16} className="mr-2" />
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Username *</label>
+          <input
+            type="text"
+            value={formData.username}
+            onChange={(e) => setFormData({...formData, username: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Choose username"
+            disabled={isSubmitting}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Email *</label>
+          <input
+            type="email"
+            value={formData.email}
+            onChange={(e) => setFormData({...formData, email: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="your@email.com"
+            disabled={isSubmitting}
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-slate-300 text-sm font-medium mb-2">Full Name *</label>
+        <input
+          type="text"
+          value={formData.full_name}
+          onChange={(e) => setFormData({...formData, full_name: e.target.value})}
+          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+          placeholder="Your full name"
+          disabled={isSubmitting}
+        />
+      </div>
+
+      <div>
+        <label className="block text-slate-300 text-sm font-medium mb-2">Role</label>
+        <select
+          value={formData.role}
+          onChange={(e) => setFormData({...formData, role: e.target.value})}
+          className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
+          disabled={isSubmitting}
+        >
+          <option value="viewer">Viewer (Read-only access)</option>
+          <option value="operator">Operator (Can run backups)</option>
+          <option value="admin">Administrator (Full access)</option>
+        </select>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Password *</label>
+          <input
+            type="password"
+            value={formData.password}
+            onChange={(e) => setFormData({...formData, password: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Choose password"
+            disabled={isSubmitting}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Confirm Password *</label>
+          <input
+            type="password"
+            value={formData.confirm_password}
+            onChange={(e) => setFormData({...formData, confirm_password: e.target.value})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Confirm password"
+            disabled={isSubmitting}
+          />
+        </div>
+      </div>
+
+      <div className="flex justify-between items-center space-x-3">
+        <button
+          onClick={onSwitchToLogin}
+          className="text-blue-400 hover:text-blue-300 text-sm"
+          disabled={isSubmitting}
+        >
+          Already have an account? Login
+        </button>
+        <div className="flex space-x-3">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white border border-slate-600 rounded-md font-medium transition-all duration-200"
+            disabled={isSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white border border-blue-600 rounded-md font-medium transition-all duration-200 flex items-center justify-center"
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? (
+              <>
+                <RefreshCw size={16} className="mr-2 animate-spin" />
+                Creating...
+              </>
+            ) : (
+              <>
+                <UserPlus size={16} className="mr-2" />
+                Register
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Storage Backend Configuration Modal
 const StorageBackendModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -646,16 +2060,13 @@ const StorageBackendModal: React.FC<{
 
   useEffect(() => {
     if (backend) {
-      // Edit mode - populate form with existing data
       setConfig({
         name: backend.name,
         storage_type: backend.storage_type,
         capacity_gb: backend.capacity_gb,
         path: backend.storage_type === 'local' ? backend.mount_point : undefined,
-        // Add other fields based on storage type
       });
     } else {
-      // Create mode - reset form
       setConfig({
         name: '',
         storage_type: 'local',
@@ -838,2123 +2249,4 @@ const StorageBackendModal: React.FC<{
             type="number"
             value={config.capacity_gb}
             onChange={(e) => setConfig({...config, capacity_gb: parseInt(e.target.value)})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            min="1"
-          />
-        </div>
-
-        {renderStorageTypeConfig()}
-
-        <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
-          <p className="text-blue-300 text-sm">
-            <strong>{config.storage_type.toUpperCase()} Storage:</strong> 
-            {config.storage_type === 'local' && ' Local filesystem storage for backup data.'}
-            {config.storage_type === 'nfs' && ' Network File System share for centralized backup storage.'}
-            {config.storage_type === 'iscsi' && ' iSCSI block storage for high-performance backup operations.'}
-          </p>
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary">
-            Cancel
-          </Button>
-          <Button 
-            onClick={handleSubmit} 
-            variant="primary"
-            disabled={!config.name}
-          >
-            <HardDrive size={16} className="mr-2" />
-            {backend ? 'Update' : 'Create'} Storage Backend
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// NEW: Instant Restore Modal
-const InstantRestoreModal: React.FC<{
-  isOpen: boolean;
-  onClose: () => void;
-  backup: Backup | null;
-  vms: VM[];
-  onRestore: (backupId: string, targetPlatform: string, config: any) => void;
-}> = ({ isOpen, onClose, backup, vms, onRestore }) => {
-  const [restoreConfig, setRestoreConfig] = useState({
-    target_platform: 'vmware',
-    vm_name: '',
-    target_host: '',
-    datastore: '',
-    network: ''
-  });
-
-  const handleSubmit = () => {
-    if (!backup) return;
-    
-    onRestore(backup.backup_id, restoreConfig.target_platform, restoreConfig);
-    onClose();
-    setRestoreConfig({
-      target_platform: 'vmware',
-      vm_name: '',
-      target_host: '',
-      datastore: '',
-      network: ''
-    });
-  };
-
-  if (!backup) return null;
-
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Instant VM Restore" size="lg">
-      <div className="space-y-6">
-        <div className="bg-slate-700 rounded p-4">
-          <h4 className="text-white font-medium mb-3">Backup Details</h4>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <span className="text-slate-300">VM:</span>
-              <span className="text-white ml-2">{backup.vm_name || backup.vm_id}</span>
-            </div>
-            <div>
-              <span className="text-slate-300">Platform:</span>
-              <span className="text-white ml-2">{backup.platform.toUpperCase()}</span>
-            </div>
-            <div>
-              <span className="text-slate-300">Type:</span>
-              <span className="text-white ml-2">{backup.backup_type}</span>
-            </div>
-            <div>
-              <span className="text-slate-300">Size:</span>
-              <span className="text-white ml-2">{Math.round(backup.size_mb / 1024)} GB</span>
-            </div>
-            <div>
-              <span className="text-slate-300">Created:</span>
-              <span className="text-white ml-2">
-                {backup.created_at ? new Date(backup.created_at).toLocaleDateString() : 'Unknown'}
-              </span>
-            </div>
-            <div>
-              <span className="text-slate-300">Encrypted:</span>
-              <span className="text-white ml-2">{backup.encrypted ? 'Yes' : 'No'}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Target Platform</label>
-            <select
-              value={restoreConfig.target_platform}
-              onChange={(e) => setRestoreConfig({...restoreConfig, target_platform: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
-            >
-              <option value="vmware">VMware vSphere</option>
-              <option value="proxmox">Proxmox VE</option>
-              <option value="xcpng">XCP-NG</option>
-              <option value="ubuntu">Ubuntu Machine</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">New VM Name</label>
-            <input
-              type="text"
-              value={restoreConfig.vm_name}
-              onChange={(e) => setRestoreConfig({...restoreConfig, vm_name: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder={`Restored-${backup.vm_name || backup.vm_id}`}
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Target Host/Datastore</label>
-            <input
-              type="text"
-              value={restoreConfig.datastore}
-              onChange={(e) => setRestoreConfig({...restoreConfig, datastore: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder="datastore1"
-            />
-          </div>
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Network</label>
-            <input
-              type="text"
-              value={restoreConfig.network}
-              onChange={(e) => setRestoreConfig({...restoreConfig, network: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder="VM Network"
-            />
-          </div>
-        </div>
-
-        <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
-          <p className="text-blue-300 text-sm">
-            <strong>Instant Restore:</strong> This will create a new VM from the backup data. 
-            The process typically takes 1-5 minutes depending on the backup size.
-          </p>
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary">
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} variant="success">
-            <RotateCcw size={16} className="mr-2" />
-            Start Restore
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// NEW: File Restore Modal
-const FileRestoreModal: React.FC<{
-  isOpen: boolean;
-  onClose: () => void;
-  backup: Backup | null;
-  onRestore: (backupId: string, filePaths: string[], targetPath: string) => void;
-}> = ({ isOpen, onClose, backup, onRestore }) => {
-  const [filePaths, setFilePaths] = useState<string>('');
-  const [targetPath, setTargetPath] = useState<string>('');
-
-  const handleSubmit = () => {
-    if (!backup || !filePaths || !targetPath) return;
-    
-    const pathsArray = filePaths.split('\n').filter(path => path.trim()).map(path => path.trim());
-    onRestore(backup.backup_id, pathsArray, targetPath);
-    onClose();
-    setFilePaths('');
-    setTargetPath('');
-  };
-
-  if (!backup) return null;
-
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title="File-Level Restore" size="lg">
-      <div className="space-y-6">
-        <div className="bg-slate-700 rounded p-4">
-          <h4 className="text-white font-medium mb-3">Backup: {backup.vm_name || backup.vm_id}</h4>
-          <div className="text-sm text-slate-300">
-            Platform: {backup.platform.toUpperCase()} | 
-            Type: {backup.backup_type} | 
-            Size: {Math.round(backup.size_mb / 1024)} GB
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">File Paths to Restore</label>
-          <textarea
-            value={filePaths}
-            onChange={(e) => setFilePaths(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors font-mono text-sm"
-            placeholder={`/etc/config.conf\n/home/user/documents/\n/var/log/application.log`}
-            rows={6}
-          />
-          <p className="text-slate-400 text-xs mt-1">Enter one file or directory path per line</p>
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Target Restore Path</label>
-          <input
-            type="text"
-            value={targetPath}
-            onChange={(e) => setTargetPath(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="/restore/location"
-          />
-        </div>
-
-        <div className="bg-amber-900 bg-opacity-30 border border-amber-500 rounded p-3">
-          <p className="text-amber-300 text-sm">
-            <strong>File Restore:</strong> Individual files will be extracted from the backup and copied to the target location. 
-            This operation may take several minutes for large files.
-          </p>
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary">
-            Cancel
-          </Button>
-          <Button 
-            onClick={handleSubmit} 
-            variant="success"
-            disabled={!filePaths.trim() || !targetPath.trim()}
-          >
-            <FileText size={16} className="mr-2" />
-            Restore Files
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// NEW: Create Backup Job Modal
-const CreateBackupJobModal: React.FC<{
-  isOpen: boolean;
-  onClose: () => void;
-  vms: VM[];
-  onCreateJob: (jobData: any) => void;
-}> = ({ isOpen, onClose, vms, onCreateJob }) => {
-  const [jobData, setJobData] = useState({
-    name: '',
-    description: '',
-    vm_id: '',
-    platform: 'vmware' as PlatformType,
-    backup_type: 'incremental' as 'full' | 'incremental' | 'differential',
-    schedule_cron: '0 2 * * *', // Daily at 2 AM
-    retention_days: 30,
-    compression_enabled: true,
-    encryption_enabled: true,
-    repository_id: 1 // Default repository
-  });
-
-  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
-
-  const handleVMSelect = (vmId: string) => {
-    const vm = vms.find(v => v.vm_id === vmId);
-    if (vm) {
-      setSelectedVM(vm);
-      setJobData({
-        ...jobData,
-        vm_id: vmId,
-        platform: vm.platform,
-        name: jobData.name || `Backup ${vm.name}`
-      });
-    }
-  };
-
-  const handleSubmit = () => {
-    if (!jobData.vm_id || !jobData.name) {
-      alert('Please select a VM and enter a job name');
-      return;
-    }
-
-    onCreateJob(jobData);
-    
-    // Reset form
-    setJobData({
-      name: '',
-      description: '',
-      vm_id: '',
-      platform: 'vmware',
-      backup_type: 'incremental',
-      schedule_cron: '0 2 * * *',
-      retention_days: 30,
-      compression_enabled: true,
-      encryption_enabled: true,
-      repository_id: 1
-    });
-    setSelectedVM(null);
-    onClose();
-  };
-
-  const schedulePresets = [
-    { label: 'Daily at 2 AM', value: '0 2 * * *' },
-    { label: 'Every 6 hours', value: '0 */6 * * *' },
-    { label: 'Weekly (Sunday)', value: '0 2 * * 0' },
-    { label: 'Monthly (1st)', value: '0 2 1 * *' },
-  ];
-
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Create Backup Job" size="lg">
-      <div className="space-y-6">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Job Name</label>
-            <input
-              type="text"
-              value={jobData.name}
-              onChange={(e) => setJobData({...jobData, name: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder="e.g., Daily Web Server Backup"
-            />
-          </div>
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Virtual Machine</label>
-            <select
-              value={jobData.vm_id}
-              onChange={(e) => handleVMSelect(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
-            >
-              <option value="">Select a VM...</option>
-              {vms.map((vm) => (
-                <option key={vm.vm_id} value={vm.vm_id}>
-                  {vm.name} ({vm.platform.toUpperCase()})
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {selectedVM && (
-          <div className="bg-slate-700 rounded p-3">
-            <h4 className="text-white font-medium mb-2">Selected VM Details</h4>
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div className="text-slate-300">Platform: <span className="text-white">{selectedVM.platform.toUpperCase()}</span></div>
-              <div className="text-slate-300">OS: <span className="text-white">{selectedVM.operating_system}</span></div>
-              <div className="text-slate-300">CPU: <span className="text-white">{selectedVM.cpu_count} cores</span></div>
-              <div className="text-slate-300">RAM: <span className="text-white">{Math.round(selectedVM.memory_mb / 1024)} GB</span></div>
-            </div>
-          </div>
-        )}
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Description</label>
-          <textarea
-            value={jobData.description}
-            onChange={(e) => setJobData({...jobData, description: e.target.value})}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Optional description for this backup job"
-            rows={2}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Backup Type</label>
-            <select
-              value={jobData.backup_type}
-              onChange={(e) => setJobData({...jobData, backup_type: e.target.value as any})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
-            >
-              <option value="incremental">Incremental</option>
-              <option value="full">Full</option>
-              <option value="differential">Differential</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Retention (Days)</label>
-            <input
-              type="number"
-              value={jobData.retention_days}
-              onChange={(e) => setJobData({...jobData, retention_days: parseInt(e.target.value)})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              min="1"
-              max="365"
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Schedule</label>
-          <div className="space-y-2">
-            <select
-              value={jobData.schedule_cron}
-              onChange={(e) => setJobData({...jobData, schedule_cron: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
-            >
-              {schedulePresets.map((preset) => (
-                <option key={preset.value} value={preset.value}>
-                  {preset.label}
-                </option>
-              ))}
-            </select>
-            <input
-              type="text"
-              value={jobData.schedule_cron}
-              onChange={(e) => setJobData({...jobData, schedule_cron: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors text-sm font-mono"
-              placeholder="Cron expression (e.g., 0 2 * * *)"
-            />
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          <div className="flex items-center space-x-3">
-            <input
-              type="checkbox"
-              checked={jobData.compression_enabled}
-              onChange={(e) => setJobData({...jobData, compression_enabled: e.target.checked})}
-              className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
-            />
-            <label className="text-slate-300 text-sm">Enable compression</label>
-          </div>
-          <div className="flex items-center space-x-3">
-            <input
-              type="checkbox"
-              checked={jobData.encryption_enabled}
-              onChange={(e) => setJobData({...jobData, encryption_enabled: e.target.checked})}
-              className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
-            />
-            <label className="text-slate-300 text-sm">Enable encryption</label>
-          </div>
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary">
-            Cancel
-          </Button>
-          <Button 
-            onClick={handleSubmit} 
-            variant="primary"
-            disabled={!jobData.vm_id || !jobData.name}
-          >
-            <Shield size={16} className="mr-2" />
-            Create Backup Job
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// VM Card component
-const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) => void; onMonitor?: (vm: VM) => void }> = ({ vm, onBackup, onEdit, onMonitor }) => {
-  const getPlatformIcon = (platform: string) => {
-    switch (platform) {
-      case 'vmware': return <Server className="text-blue-400" />;
-      case 'proxmox': return <Database className="text-red-400" />;
-      case 'xcpng': return <Cloud className="text-emerald-400" />;
-      case 'ubuntu': return <Monitor className="text-orange-400" />;
-      default: return <Server className="text-slate-400" />;
-    }
-  };
-
-  const getPlatformColor = (platform: string) => {
-    switch (platform) {
-      case 'vmware': return '#3b82f6';
-      case 'proxmox': return '#dc2626';
-      case 'xcpng': return '#059669';
-      case 'ubuntu': return '#f97316';
-      default: return '#6b7280';
-    }
-  };
-
-  return (
-    <Card className="hover:scale-105 transition-transform duration-200">
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            {getPlatformIcon(vm.platform)}
-            <div>
-              <h3 className="text-white font-semibold">{vm.name}</h3>
-              <p className="text-slate-400 text-sm font-mono">{vm.vm_id}</p>
-            </div>
-          </div>
-          <StatusIndicator status={vm.power_state} showLabel={false} />
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span 
-            className="px-2 py-1 bg-slate-700 border border-opacity-30 rounded text-xs font-mono uppercase"
-            style={{ 
-              borderColor: getPlatformColor(vm.platform),
-              color: getPlatformColor(vm.platform)
-            }}
-          >
-            {vm.platform}
-          </span>
-          <span className="text-slate-400 text-xs">
-            {vm.ip_address || vm.host}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="flex items-center space-x-2">
-            <Cpu className="text-blue-400" size={16} />
-            <span className="text-white text-sm">{vm.cpu_count} cores</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <MemoryStick className="text-blue-400" size={16} />
-            <span className="text-white text-sm">{Math.round(vm.memory_mb / 1024)} GB</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <HardDrive className="text-blue-400" size={16} />
-            <span className="text-white text-sm">{vm.disk_size_gb} GB</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <Monitor className="text-blue-400" size={16} />
-            <span className="text-white text-sm truncate">{vm.operating_system}</span>
-          </div>
-        </div>
-
-        <div className="flex space-x-2">
-          <Button 
-            onClick={() => onBackup(vm)} 
-            size="sm"
-            variant="success"
-          >
-            <Shield size={14} className="mr-1" />
-            Backup
-          </Button>
-          <Button 
-            size="sm" 
-            variant="secondary"
-            onClick={() => onMonitor && onMonitor(vm)}
-          >
-            <Eye size={14} className="mr-1" />
-            Monitor
-          </Button>
-          {onEdit && (
-            <Button 
-              size="sm" 
-              variant="secondary"
-              onClick={() => onEdit(vm)}
-            >
-              <Edit size={14} className="mr-1" />
-              Edit
-            </Button>
-          )}
-        </div>
-      </div>
-    </Card>
-  );
-};
-
-// Platform Connector component
-const PlatformConnector: React.FC<{
-  platform: PlatformType;
-  onConnect: (platform: string, data: any) => void;
-  isConnected: boolean;
-}> = ({ platform, onConnect, isConnected }) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [connectionData, setConnectionData] = useState({
-    host: '',
-    username: '',
-    password: '',
-    port: platform === 'vmware' ? 443 : 
-          platform === 'proxmox' ? 8006 : 
-          platform === 'xcpng' ? 22 : 
-          22, // ubuntu
-    ssh_key_path: '',
-    use_key: platform === 'ubuntu'
-  });
-
-  const getPlatformIcon = () => {
-    switch (platform) {
-      case 'vmware': return <Server className="text-blue-400" size={32} />;
-      case 'proxmox': return <Database className="text-red-400" size={32} />;
-      case 'xcpng': return <Cloud className="text-emerald-400" size={32} />;
-      case 'ubuntu': return <Monitor className="text-orange-400" size={32} />;
-      default: return <Server size={32} />;
-    }
-  };
-
-  const getPlatformDescription = () => {
-    switch (platform) {
-      case 'vmware': return 'VMware vSphere/ESXi';
-      case 'proxmox': return 'Proxmox Virtual Environment';
-      case 'xcpng': return 'XCP-ng Hypervisor';
-      case 'ubuntu': return 'Ubuntu Linux Machines';
-      default: return 'Virtualization Platform';
-    }
-  };
-
-  const handleConnect = () => {
-    onConnect(platform, connectionData);
-    setIsOpen(false);
-  };
-
-  return (
-    <>
-      <Card className="text-center hover:scale-105 transition-transform duration-200 relative">
-        {isConnected && (
-          <div className="absolute top-3 right-3">
-            <div className="flex items-center space-x-1 bg-emerald-600 px-2 py-1 rounded text-white text-xs">
-              <CheckCircle size={12} />
-              <span>Connected</span>
-            </div>
-          </div>
-        )}
-        <div className="space-y-4">
-          <div className="flex justify-center">{getPlatformIcon()}</div>
-          <div>
-            <h3 className="text-white font-semibold text-lg capitalize">{platform}</h3>
-            <p className="text-slate-400 text-sm">{getPlatformDescription()}</p>
-          </div>
-          <Button 
-            onClick={() => setIsOpen(true)} 
-            variant={isConnected ? "secondary" : "primary"}
-          >
-            <Zap size={16} className="mr-2" />
-            {isConnected ? 'Reconnect' : 'Connect'}
-          </Button>
-        </div>
-      </Card>
-
-      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title={`Connect to ${platform.toUpperCase()}`}>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">
-              {platform === 'ubuntu' ? 'IP Address' : 'Host Address'}
-            </label>
-            <input
-              type="text"
-              value={connectionData.host}
-              onChange={(e) => setConnectionData({...connectionData, host: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder={
-                platform === 'vmware' ? 'vcenter.domain.com or 192.168.1.10' :
-                platform === 'proxmox' ? 'proxmox.domain.com or 192.168.1.20' :
-                platform === 'xcpng' ? 'xcpng.domain.com or 192.168.1.30' :
-                'ubuntu.domain.com or 192.168.1.40'
-              }
-            />
-          </div>
-
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
-            <input
-              type="text"
-              value={connectionData.username}
-              onChange={(e) => setConnectionData({...connectionData, username: e.target.value})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-              placeholder={
-                platform === 'vmware' ? 'administrator@vsphere.local' :
-                platform === 'proxmox' ? 'root@pam' :
-                platform === 'xcpng' ? 'root' :
-                'ubuntu'
-              }
-            />
-          </div>
-
-          {platform === 'ubuntu' && (
-            <div className="flex items-center space-x-3">
-              <input
-                type="checkbox"
-                checked={connectionData.use_key}
-                onChange={(e) => setConnectionData({...connectionData, use_key: e.target.checked})}
-                className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
-              />
-              <label className="text-slate-300 text-sm">Use SSH Key Authentication</label>
-            </div>
-          )}
-
-          {platform === 'ubuntu' && connectionData.use_key ? (
-            <div>
-              <label className="block text-slate-300 text-sm font-medium mb-2">SSH Key Path</label>
-              <input
-                type="text"
-                value={connectionData.ssh_key_path}
-                onChange={(e) => setConnectionData({...connectionData, ssh_key_path: e.target.value})}
-                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-                placeholder="/path/to/private/key"
-              />
-            </div>
-          ) : (
-            <div>
-              <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
-              <input
-                type="password"
-                value={connectionData.password}
-                onChange={(e) => setConnectionData({...connectionData, password: e.target.value})}
-                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-                placeholder="••••••••"
-              />
-            </div>
-          )}
-
-          <div>
-            <label className="block text-slate-300 text-sm font-medium mb-2">Port</label>
-            <input
-              type="number"
-              value={connectionData.port}
-              onChange={(e) => setConnectionData({...connectionData, port: parseInt(e.target.value)})}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            />
-          </div>
-
-          <div className="bg-slate-700 bg-opacity-50 rounded p-3">
-            <p className="text-slate-300 text-xs">
-              <strong>Connection Test:</strong> {platform.toUpperCase()} connection will be tested before saving.
-              {platform === 'xcpng' && ' Make sure XCP-ng host is accessible and API is enabled.'}
-              {platform === 'vmware' && ' Ensure vCenter/ESXi has API access enabled.'}
-              {platform === 'proxmox' && ' Verify Proxmox web interface is accessible.'}
-            </p>
-          </div>
-
-          <div className="flex justify-end space-x-3">
-            <Button onClick={() => setIsOpen(false)} variant="secondary">
-              Cancel
-            </Button>
-            <Button 
-              onClick={handleConnect}
-              variant="primary"
-              disabled={!connectionData.host || !connectionData.username || (!connectionData.password && !connectionData.ssh_key_path)}
-            >
-              <Zap size={16} className="mr-2" />
-              Test & Connect
-            </Button>
-          </div>
-        </div>
-      </Modal>
-    </>
-  );
-};
-
-// Login Form Component
-const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const { login } = useAuth();
-
-  const handleSubmit = async () => {
-    setLoading(true);
-    setError('');
-    
-    if (!username || !password) {
-      setError('Please enter both username and password');
-      setLoading(false);
-      return;
-    }
-    
-    try {
-      const success = await login(username, password);
-      
-      if (success) {
-        onClose();
-      } else {
-        setError('Invalid credentials');
-      }
-    } catch (err: any) {
-      setError('Login failed. Please check your connection and try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Modal isOpen={true} onClose={onClose} title="Login">
-      <div className="space-y-4">
-        {error && (
-          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-            {error}
-          </div>
-        )}
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter username"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter password"
-            disabled={loading}
-            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
-          />
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary" disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
-            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
-            {loading ? 'Logging in...' : 'Login'}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// Main Dashboard Component
-const MIVUBackupDashboard: React.FC = () => {
-  const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'backups' | 'storage' | 'platforms'>('dashboard');
-  const [vmSubTab, setVmSubTab] = useState<'all' | 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu'>('all');
-  const [backupSubTab, setBackupSubTab] = useState<'backups' | 'restore-history'>('backups');
-  
-  const [stats, setStats] = useState<DashboardStats>({
-    total_backup_jobs: 0,
-    running_jobs: 0,
-    total_vms_protected: 0,
-    total_backups_size: '0 GB',
-    last_24h_jobs: 0,
-    success_rate: '0%'
-  });
-  
-  const [vms, setVMs] = useState<VM[]>([]);
-  const [backupJobs, setBackupJobs] = useState<BackupJob[]>([]);
-  const [backups, setBackups] = useState<Backup[]>([]);
-  const [restoreHistory, setRestoreHistory] = useState<RestoreHistoryItem[]>([]);
-  const [storageBackends, setStorageBackends] = useState<StorageBackend[]>([]);
-  
-  const [showCreateBackupJob, setShowCreateBackupJob] = useState(false);
-  const [showInstantRestore, setShowInstantRestore] = useState(false);
-  const [showFileRestore, setShowFileRestore] = useState(false);
-  const [showStorageBackendModal, setShowStorageBackendModal] = useState(false);
-  
-  const [selectedBackup, setSelectedBackup] = useState<Backup | null>(null);
-  const [selectedStorageBackend, setSelectedStorageBackend] = useState<StorageBackend | null>(null);
-  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
-  const [showEditVM, setShowEditVM] = useState(false);
-  const [showMonitorVM, setShowMonitorVM] = useState(false);
-  const [loading, setLoading] = useState(true);
-  
-  const [platformStatus, setPlatformStatus] = useState<PlatformStatus>({
-    vmware: false,
-    proxmox: false,
-    xcpng: false,
-    ubuntu: false
-  });
-
-  useEffect(() => {
-    loadInitialData();
-    loadPlatformStatus();
-  }, []);
-
-  const loadInitialData = async () => {
-    setLoading(true);
-    try {
-      const [statsData, allVMs, jobs, allBackups, restoreHistoryData, storageData] = await Promise.all([
-        api.getStatistics().catch(() => ({
-          total_backup_jobs: 0,
-          running_jobs: 0,
-          total_vms_protected: 0,
-          total_backups_size: '0 GB',
-          last_24h_jobs: 0,
-          success_rate: '0%'
-        })),
-        api.getAllVMs().catch(() => []),
-        api.getBackupJobs().catch(() => []),
-        api.getAllBackups().catch(() => []),
-        api.getRestoreHistory().catch(() => []),
-        api.getStorageBackends().catch(() => [])
-      ]);
-
-      setStats(statsData);
-      setVMs(allVMs);
-      setBackupJobs(jobs);
-      setBackups(allBackups);
-      setRestoreHistory(restoreHistoryData);
-      setStorageBackends(storageData);
-      
-    } catch (error) {
-      console.error('Failed to load initial data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadPlatformStatus = async () => {
-    try {
-      const status = await api.getPlatformStatus();
-      setPlatformStatus(status);
-      console.log('Loaded platform status:', status);
-    } catch (error) {
-      console.error('Failed to load platform status:', error);
-    }
-  };
-
-  const refreshAllData = async () => {
-    try {
-      const [allVMs, updatedStats, jobs, allBackups, restoreHistoryData, storageData] = await Promise.all([
-        api.getAllVMs(),
-        api.getStatistics(),
-        api.getBackupJobs(),
-        api.getAllBackups(),
-        api.getRestoreHistory(),
-        api.getStorageBackends()
-      ]);
-      
-      setVMs(allVMs);
-      setStats(updatedStats);
-      setBackupJobs(jobs);
-      setBackups(allBackups);
-      setRestoreHistory(restoreHistoryData);
-      setStorageBackends(storageData);
-      
-      await loadPlatformStatus();
-      
-    } catch (error) {
-      console.error('Failed to refresh data:', error);
-    }
-  };
-
-  const handleConnectPlatform = async (platform: string, connectionData: any) => {
-    try {
-      console.log(`Attempting to connect to ${platform} with:`, { 
-        host: connectionData.host, 
-        username: connectionData.username, 
-        port: connectionData.port 
-      });
-      
-      await api.connectPlatform(platform, connectionData);
-      
-      alert(`✅ Successfully connected to ${platform.toUpperCase()}!`);
-      
-      // Refresh all data after successful connection
-      await refreshAllData();
-      
-    } catch (error) {
-      console.error('Failed to connect:', error);
-      
-      let errorMessage = `Failed to connect to ${platform.toUpperCase()}`;
-      if (error instanceof Error) {
-        if (error.message.includes('404')) {
-          errorMessage += ': Service not available. Please check if the platform is running and accessible.';
-        } else if (error.message.includes('401') || error.message.includes('403')) {
-          errorMessage += ': Authentication failed. Please check your credentials.';
-        } else if (error.message.includes('timeout') || error.message.includes('network')) {
-          errorMessage += ': Network timeout. Please check the host address and network connectivity.';
-        } else {
-          errorMessage += `: ${error.message}`;
-        }
-      }
-      
-      alert(`❌ ${errorMessage}`);
-    }
-  };
-
-  const handleCreateBackupJob = async (jobData: any) => {
-    try {
-      await api.createBackupJob(jobData);
-      
-      // Refresh backup jobs list and stats
-      const [jobs, updatedStats] = await Promise.all([
-        api.getBackupJobs(),
-        api.getStatistics()
-      ]);
-      
-      setBackupJobs(jobs);
-      setStats(updatedStats);
-      
-      alert(`✅ Backup job "${jobData.name}" created successfully!`);
-      
-    } catch (error) {
-      console.error('Failed to create backup job:', error);
-      alert(`❌ Failed to create backup job: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleRunBackupJob = async (jobId: number) => {
-    try {
-      await api.runBackupJob(jobId);
-      
-      // Refresh jobs and stats to get updated status
-      const [jobs, updatedStats] = await Promise.all([
-        api.getBackupJobs(),
-        api.getStatistics()
-      ]);
-      
-      setBackupJobs(jobs);
-      setStats(updatedStats);
-      
-      alert(`✅ Backup job started successfully!`);
-      
-    } catch (error) {
-      console.error('Failed to run backup job:', error);
-      alert(`❌ Failed to start backup job: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleDeleteBackupJob = async (jobId: number) => {
-    if (!window.confirm('Are you sure you want to delete this backup job?')) {
-      return;
-    }
-    
-    try {
-      await api.deleteBackupJob(jobId);
-      
-      // Refresh jobs list and stats
-      const [jobs, updatedStats] = await Promise.all([
-        api.getBackupJobs(),
-        api.getStatistics()
-      ]);
-      
-      setBackupJobs(jobs);
-      setStats(updatedStats);
-      
-      alert(`✅ Backup job deleted successfully!`);
-      
-    } catch (error) {
-      console.error('Failed to delete backup job:', error);
-      alert(`❌ Failed to delete backup job: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleInstantRestore = async (backupId: string, targetPlatform: string, restoreConfig: any) => {
-    try {
-      await api.instantRestoreVM(backupId, targetPlatform, restoreConfig);
-      
-      alert('✅ Instant restore started successfully! Check the restore history for progress.');
-      
-      // Refresh restore history
-      const newRestoreHistory = await api.getRestoreHistory();
-      setRestoreHistory(newRestoreHistory);
-      
-    } catch (error) {
-      console.error('Failed to start instant restore:', error);
-      alert(`❌ Failed to start instant restore: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleFileRestore = async (backupId: string, filePaths: string[], targetPath: string) => {
-    try {
-      await api.fileRestore(backupId, filePaths, targetPath);
-      
-      alert('✅ File restore started successfully! Check the restore history for progress.');
-      
-      // Refresh restore history
-      const newRestoreHistory = await api.getRestoreHistory();
-      setRestoreHistory(newRestoreHistory);
-      
-    } catch (error) {
-      console.error('Failed to start file restore:', error);
-      alert(`❌ Failed to start file restore: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleCreateStorageBackend = async (config: StorageBackendConfig) => {
-    try {
-      await api.createStorageBackend(config);
-      await refreshAllData();
-      alert(`✅ Storage backend "${config.name}" created successfully!`);
-    } catch (error) {
-      console.error('Failed to create storage backend:', error);
-      alert(`❌ Failed to create storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleUpdateStorageBackend = async (config: StorageBackendConfig) => {
-    if (!selectedStorageBackend) return;
-    
-    try {
-      await api.updateStorageBackend(selectedStorageBackend.id, config);
-      await refreshAllData();
-      alert(`✅ Storage backend "${config.name}" updated successfully!`);
-    } catch (error) {
-      console.error('Failed to update storage backend:', error);
-      alert(`❌ Failed to update storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleDeleteStorageBackend = async (backendId: string) => {
-    if (!window.confirm('Are you sure you want to delete this storage backend? This will not delete existing backups.')) {
-      return;
-    }
-    
-    try {
-      await api.deleteStorageBackend(backendId);
-      await refreshAllData();
-      alert('✅ Storage backend deleted successfully!');
-    } catch (error) {
-      console.error('Failed to delete storage backend:', error);
-      alert(`❌ Failed to delete storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleTestStorageBackend = async (backendId: string) => {
-    try {
-      await api.testStorageBackend(backendId);
-      await refreshAllData();
-      alert('✅ Storage backend test completed successfully!');
-    } catch (error) {
-      console.error('Failed to test storage backend:', error);
-      alert(`❌ Storage backend test failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const handleSetDefaultStorageBackend = async (backendId: string) => {
-    try {
-      await api.setDefaultStorageBackend(backendId);
-      await refreshAllData();
-      alert('✅ Default storage backend updated!');
-    } catch (error) {
-      console.error('Failed to set default storage backend:', error);
-      alert(`❌ Failed to set default storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  // Filter VMs by selected subtab
-  const getFilteredVMs = () => {
-    if (vmSubTab === 'all') {
-      return vms;
-    }
-    return vms.filter(vm => vm.platform === vmSubTab);
-  };
-
-  const tabs = [
-    { id: 'dashboard', label: 'Dashboard', icon: <Terminal size={20} /> },
-    { id: 'vms', label: 'Virtual Machines', icon: <Server size={20} /> },
-    { id: 'jobs', label: 'Backup Jobs', icon: <Shield size={20} /> },
-    { id: 'backups', label: 'Backups & Restore', icon: <Archive size={20} /> },
-    { id: 'storage', label: 'Storage', icon: <HardDrive size={20} /> },
-    { id: 'platforms', label: 'Platforms', icon: <Settings size={20} /> },
-  ];
-
-  const vmSubTabs = [
-    { id: 'all', label: 'All VMs', count: vms.length },
-    { id: 'vmware', label: 'VMware', count: vms.filter(vm => vm.platform === 'vmware').length },
-    { id: 'proxmox', label: 'Proxmox', count: vms.filter(vm => vm.platform === 'proxmox').length },
-    { id: 'xcpng', label: 'XCP-NG', count: vms.filter(vm => vm.platform === 'xcpng').length },
-    { id: 'ubuntu', label: 'Ubuntu', count: vms.filter(vm => vm.platform === 'ubuntu').length },
-  ];
-
-  const backupSubTabs = [
-    { id: 'backups', label: 'Available Backups', count: backups.length },
-    { id: 'restore-history', label: 'Restore History', count: restoreHistory.length },
-  ];
-
-  // Storage Tab Content
-  const renderStorageTab = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-white">Storage Backends ({storageBackends.length})</h2>
-        <Button 
-          variant="primary" 
-          onClick={() => {
-            setSelectedStorageBackend(null);
-            setShowStorageBackendModal(true);
-          }}
-        >
-          <Plus size={16} className="mr-2" />
-          Add Storage Backend
-        </Button>
-      </div>
-
-      {storageBackends.length === 0 ? (
-        <Card>
-          <div className="text-center py-12">
-            <HardDrive className="text-blue-400 mx-auto mb-4" size={48} />
-            <h3 className="text-white text-lg font-medium mb-2">No Storage Backends</h3>
-            <p className="text-slate-400 mb-4">
-              Configure storage backends for backup destinations. All VM backups will be stored on the configured storage.
-            </p>
-            <Button 
-              variant="primary" 
-              onClick={() => {
-                setSelectedStorageBackend(null);
-                setShowStorageBackendModal(true);
-              }}
-            >
-              <Plus size={16} className="mr-2" />
-              Add Storage Backend
-            </Button>
-          </div>
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {storageBackends.map((backend) => (
-            <Card key={backend.id} className={backend.is_default ? 'border-blue-500' : ''}>
-              <div className="space-y-4">
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-2">
-                      <h3 className="text-white font-semibold">{backend.name}</h3>
-                      {backend.is_default && (
-                        <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded">DEFAULT</span>
-                      )}
-                      <StatusIndicator status={backend.health.status} showLabel={false} />
-                    </div>
-                    
-                    <div className="grid grid-cols-2 gap-3 text-sm mb-3">
-                      <div>
-                        <span className="text-slate-400">Type:</span>
-                        <span className="text-white ml-2 uppercase">{backend.storage_type}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Mounted:</span>
-                        <span className="text-white ml-2">{backend.is_mounted ? 'Yes' : 'No'}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Capacity:</span>
-                        <span className="text-white ml-2">{backend.capacity_gb} GB</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Available:</span>
-                        <span className="text-white ml-2">
-                          {backend.health.available_gb ? `${backend.health.available_gb} GB` : 'Unknown'}
-                        </span>
-                      </div>
-                    </div>
-
-                    {backend.health.message && (
-                      <p className="text-slate-400 text-sm mb-3">{backend.health.message}</p>
-                    )}
-
-                    <p className="text-slate-400 text-xs font-mono">
-                      Mount: {backend.mount_point}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button 
-                    size="sm" 
-                    variant="secondary"
-                    onClick={() => handleTestStorageBackend(backend.id)}
-                  >
-                    <Wifi size={14} className="mr-1" />
-                    Test
-                  </Button>
-                  
-                  {!backend.is_default && (
-                    <Button 
-                      size="sm" 
-                      variant="primary"
-                      onClick={() => handleSetDefaultStorageBackend(backend.id)}
-                    >
-                      <CheckCircle2 size={14} className="mr-1" />
-                      Set Default
-                    </Button>
-                  )}
-
-                  <Button 
-                    size="sm" 
-                    variant="secondary"
-                    onClick={() => {
-                      setSelectedStorageBackend(backend);
-                      setShowStorageBackendModal(true);
-                    }}
-                  >
-                    <Edit size={14} className="mr-1" />
-                    Edit
-                  </Button>
-
-                  {!backend.is_default && (
-                    <Button 
-                      size="sm" 
-                      variant="danger"
-                      onClick={() => handleDeleteStorageBackend(backend.id)}
-                    >
-                      <Trash2 size={14} className="mr-1" />
-                      Delete
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-4">
-        <h4 className="text-blue-300 font-medium mb-2">📁 Storage Information</h4>
-        <p className="text-blue-300 text-sm mb-2">
-          <strong>Local Storage:</strong> Stores backups on the local filesystem. Fast but limited by local disk space.
-        </p>
-        <p className="text-blue-300 text-sm mb-2">
-          <strong>NFS Storage:</strong> Network File System for centralized backup storage. Good for shared access across multiple backup servers.
-        </p>
-        <p className="text-blue-300 text-sm">
-          <strong>iSCSI Storage:</strong> Block-level storage over IP networks. High performance for large backup operations.
-        </p>
-      </div>
-    </div>
-  );
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <Card className="text-center">
-          <RefreshCw className="text-blue-400 animate-spin mx-auto mb-4" size={48} />
-          <h2 className="text-white text-xl">Loading...</h2>
-        </Card>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-900">
-      <header className="border-b border-slate-700 bg-slate-800">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-3">
-                <Shield className="text-blue-400" size={32} />
-                <div>
-                  <h1 className="text-xl font-bold text-white">MIVU Backup Solution</h1>
-                  <p className="text-slate-400 text-xs">Enterprise Protection System</p>
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center space-x-6">
-              <div className="flex items-center space-x-3">
-                <StatusIndicator status="online" />
-                <span className="text-slate-400 text-sm">System Online</span>
-              </div>
-              <div className="text-slate-400 text-sm">
-                {new Date().toLocaleTimeString()}
-              </div>
-              {user && (
-                <div className="flex items-center space-x-3">
-                  <div className="text-right">
-                    <div className="text-white text-sm font-medium">{user.full_name}</div>
-                    <div className="text-slate-400 text-xs">{user.role}</div>
-                  </div>
-                  <Button onClick={logout} size="sm" variant="secondary">
-                    <LogOut size={16} />
-                  </Button>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <nav className="bg-slate-800 border-b border-slate-700">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex space-x-8">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center space-x-2 py-4 px-2 border-b-2 font-medium text-sm transition-all duration-200 ${
-                  activeTab === tab.id
-                    ? 'border-blue-400 text-blue-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-500'
-                }`}
-              >
-                {tab.icon}
-                <span>{tab.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      </nav>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {activeTab === 'dashboard' && (
-          <div className="space-y-8">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              <MetricCard
-                title="Protected VMs"
-                value={vms.length.toString()}
-                icon={<Server />}
-              />
-              <MetricCard
-                title="Active Jobs"
-                value={backupJobs.length.toString()}
-                icon={<Shield />}
-              />
-              <MetricCard
-                title="Total Backups"
-                value={backups.length.toString()}
-                icon={<Archive />}
-              />
-              <MetricCard
-                title="Success Rate"
-                value={stats.success_rate}
-                icon={<CheckCircle />}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card>
-                <h3 className="text-white text-lg font-medium mb-4">System Status</h3>
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Backup Engine</span>
-                    <StatusIndicator status="online" />
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Database Connection</span>
-                    <StatusIndicator status="online" />
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Storage Backends</span>
-                    <StatusIndicator status={storageBackends.length > 0 ? "online" : "warning"} />
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Platform Connections</span>
-                    <StatusIndicator status={Object.values(platformStatus).some(Boolean) ? "online" : "offline"} />
-                  </div>
-                </div>
-              </Card>
-
-              <Card>
-                <h3 className="text-white text-lg font-medium mb-4">Platform Status</h3>
-                <div className="space-y-3">
-                  {Object.entries(platformStatus).map(([platform, connected]) => (
-                    <div key={platform} className="flex justify-between items-center">
-                      <span className="text-slate-300 capitalize">{platform} ({vms.filter(vm => vm.platform === platform).length} VMs)</span>
-                      <StatusIndicator status={connected ? "online" : "offline"} />
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card>
-                <h3 className="text-white text-lg font-medium mb-4">Storage Overview</h3>
-                <div className="space-y-3">
-                  {storageBackends.length === 0 ? (
-                    <div className="text-center py-4">
-                      <p className="text-slate-400 mb-3">No storage backends configured</p>
-                      <Button 
-                        size="sm" 
-                        variant="primary"
-                        onClick={() => {
-                          setSelectedStorageBackend(null);
-                          setShowStorageBackendModal(true);
-                        }}
-                      >
-                        <HardDrive size={14} className="mr-1" />
-                        Add Storage
-                      </Button>
-                    </div>
-                  ) : (
-                    storageBackends.slice(0, 3).map((backend) => (
-                      <div key={backend.id} className="flex justify-between items-center">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-slate-300">{backend.name}</span>
-                          {backend.is_default && (
-                            <span className="px-1 py-0.5 bg-blue-600 text-white text-xs rounded">DEFAULT</span>
-                          )}
-                        </div>
-                        <StatusIndicator status={backend.health.status} />
-                      </div>
-                    ))
-                  )}
-                </div>
-              </Card>
-
-              <Card>
-                <h3 className="text-white text-lg font-medium mb-4">Recent Activity</h3>
-                <div className="space-y-3">
-                  {backupJobs.length === 0 ? (
-                    <div className="text-center py-4">
-                      <p className="text-slate-400 mb-3">No backup jobs configured</p>
-                      <Button 
-                        size="sm" 
-                        variant="primary"
-                        onClick={() => setShowCreateBackupJob(true)}
-                        disabled={vms.length === 0}
-                      >
-                        <Shield size={14} className="mr-1" />
-                        Create Job
-                      </Button>
-                    </div>
-                  ) : (
-                    backupJobs.slice(0, 3).map((job) => (
-                      <div key={job.id} className="flex justify-between items-center">
-                        <div>
-                          <span className="text-slate-300">{job.name}</span>
-                          <p className="text-slate-500 text-xs">{job.last_run ? new Date(job.last_run).toLocaleDateString() : 'Never run'}</p>
-                        </div>
-                        <StatusIndicator status={job.status} />
-                      </div>
-                    ))
-                  )}
-                </div>
-              </Card>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'vms' && (
-          <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-white">Virtual Machines ({vms.length})</h2>
-              <div className="flex space-x-3">
-                <Button onClick={refreshAllData} variant="secondary">
-                  <RefreshCw size={16} className="mr-2" />
-                  Refresh All
-                </Button>
-              </div>
-            </div>
-
-            {/* VM Subtabs */}
-            <div className="border-b border-slate-700">
-              <div className="flex space-x-8">
-                {vmSubTabs.map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setVmSubTab(tab.id as any)}
-                    className={`flex items-center space-x-2 py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
-                      vmSubTab === tab.id
-                        ? 'border-blue-400 text-blue-400'
-                        : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-500'
-                    }`}
-                  >
-                    <span>{tab.label}</span>
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      vmSubTab === tab.id 
-                        ? 'bg-blue-400 text-slate-900' 
-                        : 'bg-slate-700 text-slate-300'
-                    }`}>
-                      {tab.count}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            
-            {getFilteredVMs().length === 0 ? (
-              <Card>
-                <div className="text-center py-12">
-                  <Server className="text-blue-400 mx-auto mb-4" size={48} />
-                  <h3 className="text-white text-lg font-medium mb-2">
-                    {vmSubTab === 'all' ? 'No Virtual Machines' : `No ${vmSubTab.toUpperCase()} VMs`}
-                  </h3>
-                  <p className="text-slate-400 mb-4">
-                    {vmSubTab === 'all' 
-                      ? 'Connect to platforms first to discover VMs automatically'
-                      : `No VMs found for ${vmSubTab.toUpperCase()} platform`
-                    }
-                  </p>
-                  <div className="flex justify-center space-x-3">
-                    <Button variant="primary" onClick={() => setActiveTab('platforms')}>
-                      <Settings size={16} className="mr-2" />
-                      Connect Platforms
-                    </Button>
-                  </div>
-                </div>
-              </Card>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {getFilteredVMs().map((vm) => (
-                  <VMCard 
-                    key={`${vm.platform}-${vm.vm_id}`} 
-                    vm={vm} 
-                    onBackup={() => {
-                      setSelectedVM(vm);
-                      setShowCreateBackupJob(true);
-                    }}
-                    onEdit={(vm) => {
-                      setSelectedVM(vm);
-                      setShowEditVM(true);
-                    }}
-                    onMonitor={(vm) => {
-                      setSelectedVM(vm);
-                      setShowMonitorVM(true);
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'jobs' && (
-          <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-white">Backup Jobs ({backupJobs.length})</h2>
-              <Button 
-                variant="primary" 
-                onClick={() => setShowCreateBackupJob(true)}
-                disabled={vms.length === 0}
-              >
-                <Plus size={16} className="mr-2" />
-                New Job
-              </Button>
-            </div>
-
-            {backupJobs.length === 0 ? (
-              <Card>
-                <div className="text-center py-12">
-                  <Shield className="text-blue-400 mx-auto mb-4" size={48} />
-                  <h3 className="text-white text-lg font-medium mb-2">No Backup Jobs</h3>
-                  <p className="text-slate-400 mb-4">
-                    {vms.length === 0 
-                      ? 'Connect to platforms and discover VMs first'
-                      : 'Create your first backup job to get started'
-                    }
-                  </p>
-                  {vms.length > 0 ? (
-                    <Button variant="primary" onClick={() => setShowCreateBackupJob(true)}>
-                      <Plus size={16} className="mr-2" />
-                      Create Backup Job
-                    </Button>
-                  ) : (
-                    <Button variant="primary" onClick={() => setActiveTab('platforms')}>
-                      <Settings size={16} className="mr-2" />
-                      Connect Platforms
-                    </Button>
-                  )}
-                </div>
-              </Card>
-            ) : (
-              <div className="space-y-4">
-                {backupJobs.map((job) => (
-                  <Card key={job.id}>
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
-                        <div className="flex items-center space-x-3 mb-2">
-                          <h3 className="text-white font-semibold">{job.name}</h3>
-                          <StatusIndicator status={job.status} />
-                          <span className="text-slate-400 text-sm">
-                            {job.platform.toUpperCase()}
-                          </span>
-                        </div>
-                        {job.description && (
-                          <p className="text-slate-400 text-sm mb-2">{job.description}</p>
-                        )}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                          <div>
-                            <span className="text-slate-400">VM:</span>
-                            <span className="text-white ml-2">{job.vm_id}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">Type:</span>
-                            <span className="text-white ml-2">{job.backup_type}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">Last Run:</span>
-                            <span className="text-white ml-2">
-                              {job.last_run ? new Date(job.last_run).toLocaleDateString() : 'Never'}
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">Next Run:</span>
-                            <span className="text-white ml-2">
-                              {job.next_run ? new Date(job.next_run).toLocaleDateString() : 'Not scheduled'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex space-x-2 ml-4">
-                        <Button 
-                          size="sm" 
-                          variant="primary"
-                          onClick={() => handleRunBackupJob(job.id)}
-                          disabled={job.status === 'running'}
-                        >
-                          <Shield size={14} className="mr-1" />
-                          {job.status === 'running' ? 'Running...' : 'Run Now'}
-                        </Button>
-                        <Button 
-                          size="sm" 
-                          variant="danger"
-                          onClick={() => handleDeleteBackupJob(job.id)}
-                        >
-                          <X size={14} className="mr-1" />
-                          Delete
-                        </Button>
-                      </div>
-                    </div>
-                  </Card>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Backups & Restore Tab */}
-        {activeTab === 'backups' && (
-          <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-white">Backups & Restore</h2>
-              <Button onClick={refreshAllData} variant="secondary">
-                <RefreshCw size={16} className="mr-2" />
-                Refresh
-              </Button>
-            </div>
-
-            {/* Backup Subtabs */}
-            <div className="border-b border-slate-700">
-              <div className="flex space-x-8">
-                {backupSubTabs.map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setBackupSubTab(tab.id as any)}
-                    className={`flex items-center space-x-2 py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
-                      backupSubTab === tab.id
-                        ? 'border-blue-400 text-blue-400'
-                        : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-500'
-                    }`}
-                  >
-                    <span>{tab.label}</span>
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      backupSubTab === tab.id 
-                        ? 'bg-blue-400 text-slate-900' 
-                        : 'bg-slate-700 text-slate-300'
-                    }`}>
-                      {tab.count}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {backupSubTab === 'backups' ? (
-              <div className="space-y-4">
-                {backups.length === 0 ? (
-                  <Card>
-                    <div className="text-center py-12">
-                      <Archive className="text-blue-400 mx-auto mb-4" size={48} />
-                      <h3 className="text-white text-lg font-medium mb-2">No Backups Available</h3>
-                      <p className="text-slate-400 mb-4">
-                        Create and run backup jobs to see available backups here
-                      </p>
-                      <Button variant="primary" onClick={() => setActiveTab('jobs')}>
-                        <Shield size={16} className="mr-2" />
-                        View Backup Jobs
-                      </Button>
-                    </div>
-                  </Card>
-                ) : (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    {backups.map((backup, index) => (
-                      <Card key={`${backup.backup_id}-${index}`}>
-                        <div className="space-y-4">
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <h3 className="text-white font-semibold">
-                                {backup.vm_name || backup.vm_id}
-                              </h3>
-                              <p className="text-slate-400 text-sm">
-                                ID: {backup.backup_id.slice(0, 8)}...
-                              </p>
-                            </div>
-                            <span className="px-2 py-1 bg-slate-700 border border-blue-500 rounded text-xs font-mono text-blue-400">
-                              {backup.platform.toUpperCase()}
-                            </span>
-                          </div>
-                          
-                          <div className="grid grid-cols-2 gap-3 text-sm">
-                            <div>
-                              <span className="text-slate-400">Type:</span>
-                              <span className="text-white ml-2">{backup.backup_type}</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-400">Size:</span>
-                              <span className="text-white ml-2">{Math.round(backup.size_mb / 1024)} GB</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-400">Created:</span>
-                              <span className="text-white ml-2">
-                                {backup.created_at ? new Date(backup.created_at).toLocaleDateString() : 'Unknown'}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-slate-400">Storage:</span>
-                              <span className="text-white ml-2">
-                                {backup.storage_backend_id || 'Local'}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex space-x-2">
-                            <Button 
-                              size="sm" 
-                              variant="success"
-                              onClick={() => {
-                                setSelectedBackup(backup);
-                                setShowInstantRestore(true);
-                              }}
-                            >
-                              <RotateCcw size={14} className="mr-1" />
-                              Instant Restore
-                            </Button>
-                            <Button 
-                              size="sm" 
-                              variant="secondary"
-                              onClick={() => {
-                                setSelectedBackup(backup);
-                                setShowFileRestore(true);
-                              }}
-                            >
-                              <FileText size={14} className="mr-1" />
-                              File Restore
-                            </Button>
-                          </div>
-                        </div>
-                      </Card>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {restoreHistory.length === 0 ? (
-                  <Card>
-                    <div className="text-center py-12">
-                      <Clock className="text-blue-400 mx-auto mb-4" size={48} />
-                      <h3 className="text-white text-lg font-medium mb-2">No Restore History</h3>
-                      <p className="text-slate-400 mb-4">
-                        Restore operations will appear here
-                      </p>
-                    </div>
-                  </Card>
-                ) : (
-                  <div className="space-y-4">
-                    {restoreHistory.map((restore) => (
-                      <Card key={restore.id}>
-                        <div className="flex justify-between items-start">
-                          <div className="flex-1">
-                            <div className="flex items-center space-x-3 mb-2">
-                              <h3 className="text-white font-semibold">
-                                Restore: {restore.backup_id.slice(0, 8)}...
-                              </h3>
-                              <StatusIndicator status={restore.status} />
-                            </div>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                              <div>
-                                <span className="text-slate-400">VM:</span>
-                                <span className="text-white ml-2">{restore.vm_id}</span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400">Started:</span>
-                                <span className="text-white ml-2">
-                                  {new Date(restore.start_time).toLocaleDateString()}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400">Completed:</span>
-                                <span className="text-white ml-2">
-                                  {restore.end_time ? new Date(restore.end_time).toLocaleDateString() : 'In Progress'}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400">Operation:</span>
-                                <span className="text-white ml-2">
-                                  {restore.metadata?.operation || 'Unknown'}
-                                </span>
-                              </div>
-                            </div>
-                            {restore.error_message && (
-                              <div className="mt-2">
-                                <p className="text-red-400 text-sm">
-                                  Error: {restore.error_message}
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </Card>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'storage' && renderStorageTab()}
-
-        {activeTab === 'platforms' && (
-          <div className="space-y-6">
-            <h2 className="text-2xl font-bold text-white">Platform Connections</h2>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {(['vmware', 'proxmox', 'xcpng', 'ubuntu'] as PlatformType[]).map((platform) => (
-                <PlatformConnector 
-                  key={platform}
-                  platform={platform} 
-                  onConnect={handleConnectPlatform} 
-                  isConnected={platformStatus[platform]}
-                />
-              ))}
-            </div>
-
-            <Card>
-              <h3 className="text-white text-lg font-medium mb-4">Platform Requirements</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
-                <div>
-                  <h4 className="text-blue-400 font-medium mb-2">VMware vSphere/ESXi</h4>
-                  <ul className="text-slate-300 space-y-1">
-                    <li>• vCenter Server or ESXi host</li>
-                    <li>• User with backup privileges</li>
-                    <li>• API access enabled</li>
-                    <li>• Port 443 accessible</li>
-                  </ul>
-                </div>
-                <div>
-                  <h4 className="text-red-400 font-medium mb-2">Proxmox VE</h4>
-                  <ul className="text-slate-300 space-y-1">
-                    <li>• Proxmox VE cluster or node</li>
-                    <li>• User with VM.Backup privileges</li>
-                    <li>• Web interface accessible</li>
-                    <li>• Port 8006 accessible</li>
-                  </ul>
-                </div>
-                <div>
-                  <h4 className="text-emerald-400 font-medium mb-2">XCP-NG</h4>
-                  <ul className="text-slate-300 space-y-1">
-                    <li>• XCP-NG host or pool</li>
-                    <li>• SSH access with root/admin</li>
-                    <li>• xe command line tools</li>
-                    <li>• Port 22 accessible</li>
-                  </ul>
-                </div>
-                <div>
-                  <h4 className="text-orange-400 font-medium mb-2">Ubuntu Machines</h4>
-                  <ul className="text-slate-300 space-y-1">
-                    <li>• Ubuntu 18.04+ machines</li>
-                    <li>• SSH access configured</li>
-                    <li>• rsync and tar installed</li>
-                    <li>• Port 22 accessible</li>
-                  </ul>
-                </div>
-              </div>
-            </Card>
-          </div>
-        )}
-      </main>
-
-      {/* Modals */}
-      <CreateBackupJobModal
-        isOpen={showCreateBackupJob}
-        onClose={() => {
-          setShowCreateBackupJob(false);
-          setSelectedVM(null);
-        }}
-        vms={vms}
-        onCreateJob={handleCreateBackupJob}
-      />
-
-      <InstantRestoreModal
-        isOpen={showInstantRestore}
-        onClose={() => {
-          setShowInstantRestore(false);
-          setSelectedBackup(null);
-        }}
-        backup={selectedBackup}
-        vms={vms}
-        onRestore={handleInstantRestore}
-      />
-
-      <FileRestoreModal
-        isOpen={showFileRestore}
-        onClose={() => {
-          setShowFileRestore(false);
-          setSelectedBackup(null);
-        }}
-        backup={selectedBackup}
-        onRestore={handleFileRestore}
-      />
-
-      <StorageBackendModal
-        isOpen={showStorageBackendModal}
-        onClose={() => {
-          setShowStorageBackendModal(false);
-          setSelectedStorageBackend(null);
-        }}
-        backend={selectedStorageBackend}
-        onSave={selectedStorageBackend ? handleUpdateStorageBackend : handleCreateStorageBackend}
-      />
-
-      {showEditVM && selectedVM && (
-        <Modal isOpen={true} onClose={() => { setShowEditVM(false); setSelectedVM(null); }} title={`Edit VM: ${selectedVM.name}`}>
-          <div className="text-center py-8">
-            <h3 className="text-white font-medium mb-4">VM editing functionality coming soon!</h3>
-            <p className="text-slate-400 mb-4">VM details are automatically synced from the platform.</p>
-            <Button onClick={() => { setShowEditVM(false); setSelectedVM(null); }} variant="primary">
-              Close
-            </Button>
-          </div>
-        </Modal>
-      )}
-
-      {showMonitorVM && selectedVM && (
-        <Modal isOpen={true} onClose={() => { setShowMonitorVM(false); setSelectedVM(null); }} title={`Monitor: ${selectedVM.name}`} size="lg">
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-slate-300">Status:</span>
-                  <StatusIndicator status={selectedVM.power_state} />
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-300">Platform:</span>
-                  <span className="text-white font-mono">{selectedVM.platform.toUpperCase()}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-300">IP Address:</span>
-                  <span className="text-white font-mono">{selectedVM.ip_address || selectedVM.host}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-300">OS:</span>
-                  <span className="text-white">{selectedVM.operating_system}</span>
-                </div>
-              </div>
-              
-              <div className="space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-slate-300">CPU:</span>
-                  <span className="text-white">{selectedVM.cpu_count} cores</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-300">Memory:</span>
-                  <span className="text-white">{Math.round(selectedVM.memory_mb / 1024)} GB</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-300">Storage:</span>
-                  <span className="text-white">{selectedVM.disk_size_gb} GB</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-300">Created:</span>
-                  <span className="text-white">{new Date(selectedVM.created_at).toLocaleDateString()}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
-              <p className="text-blue-300 text-sm">
-                Real-time monitoring features coming soon! This will include CPU usage, memory consumption, network activity, and more.
-              </p>
-            </div>
-
-            <div className="flex justify-end space-x-3">
-              <Button onClick={() => { setShowMonitorVM(false); setSelectedVM(null); }} variant="secondary">
-                Close
-              </Button>
-            </div>
-          </div>
-        </Modal>
-      )}
-    </div>
-  );
-};
-
-// Auth Guard and App component (keeping existing...)
-const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuth();
-  const [showLogin, setShowLogin] = useState(false);
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <Card className="text-center w-96">
-          <div className="space-y-6">
-            <div className="flex justify-center">
-              <Shield className="text-blue-400" size={64} />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white">
-                MIVU Backup Solution
-              </h1>
-              <p className="text-slate-400 text-sm mt-2">Please login to continue</p>
-            </div>
-            <div className="flex space-x-3 justify-center">
-              <Button onClick={() => setShowLogin(true)} variant="primary">
-                <LogIn size={16} className="mr-2" />
-                Login
-              </Button>
-            </div>
-          </div>
-        </Card>
-
-        {showLogin && (
-          <div>Login form would go here...</div>
-        )}
-      </div>
-    );
-  }
-
-  return <>{children}</>;
-};
-
-const App: React.FC = () => {
-  return (
-    <AuthProvider>
-      <AuthGuard>
-        <MIVUBackupDashboard />
-      </AuthGuard>
-    </AuthProvider>
-  );
-};
-
-export default App;
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-
