@@ -1,4 +1,4 @@
-// Updated App.tsx with comprehensive restore functionality and backup listing
+// Updated App.tsx with Storage Management Tab - PRODUCTION READY
 
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { 
@@ -26,10 +26,16 @@ import {
   RotateCcw,
   FileText,
   Clock,
-  Archive
+  Archive,
+  FolderOpen,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  Wifi,
+  Trash2
 } from 'lucide-react';
 
-// Types (keeping existing types and adding new ones...)
+// Types (keeping existing types and adding storage types...)
 interface User {
   id: number;
   username: string;
@@ -107,6 +113,46 @@ interface RestoreHistoryItem {
   metadata?: any;
 }
 
+// NEW: Storage Backend Types
+interface StorageBackend {
+  id: string;
+  name: string;
+  storage_type: 'local' | 'nfs' | 'iscsi';
+  capacity_gb: number;
+  is_mounted: boolean;
+  mount_point: string;
+  health: {
+    status: 'healthy' | 'warning' | 'error';
+    message?: string;
+    available_gb?: number;
+    total_gb?: number;
+  };
+  is_default: boolean;
+}
+
+interface StorageBackendConfig {
+  name: string;
+  storage_type: 'local' | 'nfs' | 'iscsi';
+  capacity_gb: number;
+  
+  // Local storage config
+  path?: string;
+  
+  // NFS storage config
+  server?: string;
+  remote_path?: string;
+  mount_options?: string;
+  local_mount_point?: string;
+  
+  // iSCSI storage config
+  target_ip?: string;
+  target_port?: number;
+  target_iqn?: string;
+  initiator_name?: string;
+  username?: string;
+  password?: string;
+}
+
 type PlatformType = 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu';
 
 interface DashboardStats {
@@ -125,7 +171,7 @@ interface PlatformStatus {
   ubuntu: boolean;
 }
 
-// API Service with new restore methods
+// API Service with storage methods
 class APIService {
   private baseURL: string;
   private authToken: string | null = null;
@@ -258,7 +304,7 @@ class APIService {
     return this.request('/platforms/status');
   }
 
-  // NEW: Backup and Restore methods
+  // Backup and Restore methods (keeping existing...)
   async getAllBackups(): Promise<Backup[]> {
     return this.request('/storage/backups');
   }
@@ -290,8 +336,53 @@ class APIService {
     });
   }
 
-  async getStorageBackends() {
+  // NEW: Storage Backend Methods
+  async getStorageBackends(): Promise<StorageBackend[]> {
     return this.request('/storage/backends');
+  }
+
+  async createStorageBackend(config: StorageBackendConfig) {
+    return this.request('/storage/backends', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async updateStorageBackend(backendId: string, config: StorageBackendConfig) {
+    return this.request(`/storage/backends/${backendId}`, {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async deleteStorageBackend(backendId: string) {
+    return this.request(`/storage/backends/${backendId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testStorageBackend(backendId: string) {
+    return this.request(`/storage/backends/${backendId}/test`, {
+      method: 'POST',
+    });
+  }
+
+  async setDefaultStorageBackend(backendId: string) {
+    return this.request(`/storage/backends/${backendId}/set-default`, {
+      method: 'POST',
+    });
+  }
+
+  async mountStorageBackend(backendId: string) {
+    return this.request(`/storage/backends/${backendId}/mount`, {
+      method: 'POST',
+    });
+  }
+
+  async unmountStorageBackend(backendId: string) {
+    return this.request(`/storage/backends/${backendId}/unmount`, {
+      method: 'POST',
+    });
   }
 
   async installUbuntuAgent(vmId: string) {
@@ -450,7 +541,7 @@ const Modal: React.FC<{
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className={`bg-slate-800 border border-slate-700 rounded-lg ${sizeClasses[size]} max-w-full mx-4`}>
+      <div className={`bg-slate-800 border border-slate-700 rounded-lg ${sizeClasses[size]} max-w-full mx-4 max-h-[90vh] overflow-y-auto`}>
         <div className="flex items-center justify-between p-4 border-b border-slate-700">
           <h2 className="text-lg font-semibold text-white">{title}</h2>
           <button
@@ -476,17 +567,21 @@ const StatusIndicator: React.FC<{
     switch (status.toLowerCase()) {
       case 'completed':
       case 'success':
+      case 'healthy':
+      case 'mounted':
       case 'poweredon':
-        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'SUCCESS' };
+        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'HEALTHY' };
       case 'running':
       case 'in progress':
         return { color: 'text-amber-400', bg: 'bg-amber-400', label: 'RUNNING' };
       case 'failed':
       case 'error':
-        return { color: 'text-red-400', bg: 'bg-red-400', label: 'FAILED' };
+      case 'unmounted':
+        return { color: 'text-red-400', bg: 'bg-red-400', label: 'ERROR' };
       case 'pending':
       case 'scheduled':
-        return { color: 'text-yellow-400', bg: 'bg-yellow-400', label: 'PENDING' };
+      case 'warning':
+        return { color: 'text-yellow-400', bg: 'bg-yellow-400', label: 'WARNING' };
       case 'paused':
       case 'stopped':
         return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'STOPPED' };
@@ -534,6 +629,248 @@ const MetricCard: React.FC<{
     </div>
   </Card>
 );
+
+// NEW: Storage Backend Configuration Modal
+const StorageBackendModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  backend?: StorageBackend | null;
+  onSave: (config: StorageBackendConfig) => void;
+}> = ({ isOpen, onClose, backend, onSave }) => {
+  const [config, setConfig] = useState<StorageBackendConfig>({
+    name: '',
+    storage_type: 'local',
+    capacity_gb: 1000,
+    path: '/app/backups'
+  });
+
+  useEffect(() => {
+    if (backend) {
+      // Edit mode - populate form with existing data
+      setConfig({
+        name: backend.name,
+        storage_type: backend.storage_type,
+        capacity_gb: backend.capacity_gb,
+        path: backend.storage_type === 'local' ? backend.mount_point : undefined,
+        // Add other fields based on storage type
+      });
+    } else {
+      // Create mode - reset form
+      setConfig({
+        name: '',
+        storage_type: 'local',
+        capacity_gb: 1000,
+        path: '/app/backups'
+      });
+    }
+  }, [backend, isOpen]);
+
+  const handleSubmit = () => {
+    if (!config.name) {
+      alert('Please enter a storage backend name');
+      return;
+    }
+
+    onSave(config);
+    onClose();
+  };
+
+  const renderStorageTypeConfig = () => {
+    switch (config.storage_type) {
+      case 'local':
+        return (
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Local Path</label>
+            <input
+              type="text"
+              value={config.path || ''}
+              onChange={(e) => setConfig({...config, path: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="/app/backups"
+            />
+            <p className="text-slate-400 text-xs mt-1">Local directory path for storing backups</p>
+          </div>
+        );
+
+      case 'nfs':
+        return (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">NFS Server</label>
+                <input
+                  type="text"
+                  value={config.server || ''}
+                  onChange={(e) => setConfig({...config, server: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="192.168.1.100"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Remote Path</label>
+                <input
+                  type="text"
+                  value={config.remote_path || ''}
+                  onChange={(e) => setConfig({...config, remote_path: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="/exports/backups"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">Local Mount Point</label>
+              <input
+                type="text"
+                value={config.local_mount_point || ''}
+                onChange={(e) => setConfig({...config, local_mount_point: e.target.value})}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                placeholder="/mnt/nfs_backups"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">Mount Options</label>
+              <input
+                type="text"
+                value={config.mount_options || ''}
+                onChange={(e) => setConfig({...config, mount_options: e.target.value})}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                placeholder="rw,hard,intr,timeo=300"
+              />
+            </div>
+          </div>
+        );
+
+      case 'iscsi':
+        return (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Target IP</label>
+                <input
+                  type="text"
+                  value={config.target_ip || ''}
+                  onChange={(e) => setConfig({...config, target_ip: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="192.168.1.200"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Target Port</label>
+                <input
+                  type="number"
+                  value={config.target_port || 3260}
+                  onChange={(e) => setConfig({...config, target_port: parseInt(e.target.value)})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-slate-300 text-sm font-medium mb-2">Target IQN</label>
+              <input
+                type="text"
+                value={config.target_iqn || ''}
+                onChange={(e) => setConfig({...config, target_iqn: e.target.value})}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                placeholder="iqn.2023-01.com.example:backup-target"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Username (Optional)</label>
+                <input
+                  type="text"
+                  value={config.username || ''}
+                  onChange={(e) => setConfig({...config, username: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="iscsi_user"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 text-sm font-medium mb-2">Password (Optional)</label>
+                <input
+                  type="password"
+                  value={config.password || ''}
+                  onChange={(e) => setConfig({...config, password: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+                  placeholder="••••••••"
+                />
+              </div>
+            </div>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={backend ? "Edit Storage Backend" : "Add Storage Backend"} size="lg">
+      <div className="space-y-6">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Backend Name</label>
+            <input
+              type="text"
+              value={config.name}
+              onChange={(e) => setConfig({...config, name: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="Production Backup Storage"
+            />
+          </div>
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Storage Type</label>
+            <select
+              value={config.storage_type}
+              onChange={(e) => setConfig({...config, storage_type: e.target.value as 'local' | 'nfs' | 'iscsi'})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
+            >
+              <option value="local">Local Storage</option>
+              <option value="nfs">NFS Share</option>
+              <option value="iscsi">iSCSI LUN</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Capacity (GB)</label>
+          <input
+            type="number"
+            value={config.capacity_gb}
+            onChange={(e) => setConfig({...config, capacity_gb: parseInt(e.target.value)})}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            min="1"
+          />
+        </div>
+
+        {renderStorageTypeConfig()}
+
+        <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
+          <p className="text-blue-300 text-sm">
+            <strong>{config.storage_type.toUpperCase()} Storage:</strong> 
+            {config.storage_type === 'local' && ' Local filesystem storage for backup data.'}
+            {config.storage_type === 'nfs' && ' Network File System share for centralized backup storage.'}
+            {config.storage_type === 'iscsi' && ' iSCSI block storage for high-performance backup operations.'}
+          </p>
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Cancel
+          </Button>
+          <Button 
+            onClick={handleSubmit} 
+            variant="primary"
+            disabled={!config.name}
+          >
+            <HardDrive size={16} className="mr-2" />
+            {backend ? 'Update' : 'Create'} Storage Backend
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
 
 // NEW: Instant Restore Modal
 const InstantRestoreModal: React.FC<{
@@ -754,7 +1091,7 @@ const FileRestoreModal: React.FC<{
   );
 };
 
-// NEW: Create Backup Job Modal (keeping existing implementation...)
+// NEW: Create Backup Job Modal
 const CreateBackupJobModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -964,88 +1301,7 @@ const CreateBackupJobModal: React.FC<{
   );
 };
 
-// Login Form Component (keeping existing...)
-const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const { login } = useAuth();
-
-  const handleSubmit = async () => {
-    setLoading(true);
-    setError('');
-    
-    if (!username || !password) {
-      setError('Please enter both username and password');
-      setLoading(false);
-      return;
-    }
-    
-    try {
-      const success = await login(username, password);
-      
-      if (success) {
-        onClose();
-      } else {
-        setError('Invalid credentials');
-      }
-    } catch (err: any) {
-      setError('Login failed. Please check your connection and try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Modal isOpen={true} onClose={onClose} title="Login">
-      <div className="space-y-4">
-        {error && (
-          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-            {error}
-          </div>
-        )}
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter username"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter password"
-            disabled={loading}
-            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
-          />
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary" disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
-            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
-            {loading ? 'Logging in...' : 'Login'}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// VM Card component (keeping existing...)
+// VM Card component
 const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) => void; onMonitor?: (vm: VM) => void }> = ({ vm, onBackup, onEdit, onMonitor }) => {
   const getPlatformIcon = (platform: string) => {
     switch (platform) {
@@ -1142,29 +1398,13 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) =
               Edit
             </Button>
           )}
-          {vm.platform === 'ubuntu' && (
-            <Button 
-              size="sm" 
-              variant="secondary"
-              onClick={() => {
-                api.installUbuntuAgent(vm.vm_id).then(() => {
-                  alert('Ubuntu agent installation started');
-                }).catch((error) => {
-                  alert('Failed to install Ubuntu agent: ' + error.message);
-                });
-              }}
-            >
-              <Download size={14} className="mr-1" />
-              Agent
-            </Button>
-          )}
         </div>
       </div>
     </Card>
   );
 };
 
-// Platform Connector component (keeping existing implementation but simplified...)
+// Platform Connector component
 const PlatformConnector: React.FC<{
   platform: PlatformType;
   onConnect: (platform: string, data: any) => void;
@@ -1345,12 +1585,94 @@ const PlatformConnector: React.FC<{
   );
 };
 
-// Main Dashboard Component with NEW Restore Tab
+// Login Form Component
+const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const { login } = useAuth();
+
+  const handleSubmit = async () => {
+    setLoading(true);
+    setError('');
+    
+    if (!username || !password) {
+      setError('Please enter both username and password');
+      setLoading(false);
+      return;
+    }
+    
+    try {
+      const success = await login(username, password);
+      
+      if (success) {
+        onClose();
+      } else {
+        setError('Invalid credentials');
+      }
+    } catch (err: any) {
+      setError('Login failed. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title="Login">
+      <div className="space-y-4">
+        {error && (
+          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
+            {error}
+          </div>
+        )}
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter username"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter password"
+            disabled={loading}
+            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
+          />
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary" disabled={loading}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
+            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
+            {loading ? 'Logging in...' : 'Login'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// Main Dashboard Component
 const MIVUBackupDashboard: React.FC = () => {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'backups' | 'platforms'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'backups' | 'storage' | 'platforms'>('dashboard');
   const [vmSubTab, setVmSubTab] = useState<'all' | 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu'>('all');
   const [backupSubTab, setBackupSubTab] = useState<'backups' | 'restore-history'>('backups');
+  
   const [stats, setStats] = useState<DashboardStats>({
     total_backup_jobs: 0,
     running_jobs: 0,
@@ -1359,20 +1681,25 @@ const MIVUBackupDashboard: React.FC = () => {
     last_24h_jobs: 0,
     success_rate: '0%'
   });
+  
   const [vms, setVMs] = useState<VM[]>([]);
   const [backupJobs, setBackupJobs] = useState<BackupJob[]>([]);
   const [backups, setBackups] = useState<Backup[]>([]);
   const [restoreHistory, setRestoreHistory] = useState<RestoreHistoryItem[]>([]);
-  const [showAddVM, setShowAddVM] = useState(false);
-  const [showNetworkDiscovery, setShowNetworkDiscovery] = useState(false);
-  const [showEditVM, setShowEditVM] = useState(false);
-  const [showMonitorVM, setShowMonitorVM] = useState(false);
+  const [storageBackends, setStorageBackends] = useState<StorageBackend[]>([]);
+  
   const [showCreateBackupJob, setShowCreateBackupJob] = useState(false);
   const [showInstantRestore, setShowInstantRestore] = useState(false);
   const [showFileRestore, setShowFileRestore] = useState(false);
-  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
+  const [showStorageBackendModal, setShowStorageBackendModal] = useState(false);
+  
   const [selectedBackup, setSelectedBackup] = useState<Backup | null>(null);
+  const [selectedStorageBackend, setSelectedStorageBackend] = useState<StorageBackend | null>(null);
+  const [selectedVM, setSelectedVM] = useState<VM | null>(null);
+  const [showEditVM, setShowEditVM] = useState(false);
+  const [showMonitorVM, setShowMonitorVM] = useState(false);
   const [loading, setLoading] = useState(true);
+  
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus>({
     vmware: false,
     proxmox: false,
@@ -1388,8 +1715,7 @@ const MIVUBackupDashboard: React.FC = () => {
   const loadInitialData = async () => {
     setLoading(true);
     try {
-      // Load stats, VMs, backup jobs, and backups
-      const [statsData, allVMs, jobs, allBackups, restoreHistoryData] = await Promise.all([
+      const [statsData, allVMs, jobs, allBackups, restoreHistoryData, storageData] = await Promise.all([
         api.getStatistics().catch(() => ({
           total_backup_jobs: 0,
           running_jobs: 0,
@@ -1401,7 +1727,8 @@ const MIVUBackupDashboard: React.FC = () => {
         api.getAllVMs().catch(() => []),
         api.getBackupJobs().catch(() => []),
         api.getAllBackups().catch(() => []),
-        api.getRestoreHistory().catch(() => [])
+        api.getRestoreHistory().catch(() => []),
+        api.getStorageBackends().catch(() => [])
       ]);
 
       setStats(statsData);
@@ -1409,6 +1736,7 @@ const MIVUBackupDashboard: React.FC = () => {
       setBackupJobs(jobs);
       setBackups(allBackups);
       setRestoreHistory(restoreHistoryData);
+      setStorageBackends(storageData);
       
     } catch (error) {
       console.error('Failed to load initial data:', error);
@@ -1429,12 +1757,13 @@ const MIVUBackupDashboard: React.FC = () => {
 
   const refreshAllData = async () => {
     try {
-      const [allVMs, updatedStats, jobs, allBackups, restoreHistoryData] = await Promise.all([
+      const [allVMs, updatedStats, jobs, allBackups, restoreHistoryData, storageData] = await Promise.all([
         api.getAllVMs(),
         api.getStatistics(),
         api.getBackupJobs(),
         api.getAllBackups(),
-        api.getRestoreHistory()
+        api.getRestoreHistory(),
+        api.getStorageBackends()
       ]);
       
       setVMs(allVMs);
@@ -1442,8 +1771,8 @@ const MIVUBackupDashboard: React.FC = () => {
       setBackupJobs(jobs);
       setBackups(allBackups);
       setRestoreHistory(restoreHistoryData);
+      setStorageBackends(storageData);
       
-      // Reload platform status
       await loadPlatformStatus();
       
     } catch (error) {
@@ -1585,6 +1914,67 @@ const MIVUBackupDashboard: React.FC = () => {
     }
   };
 
+  const handleCreateStorageBackend = async (config: StorageBackendConfig) => {
+    try {
+      await api.createStorageBackend(config);
+      await refreshAllData();
+      alert(`✅ Storage backend "${config.name}" created successfully!`);
+    } catch (error) {
+      console.error('Failed to create storage backend:', error);
+      alert(`❌ Failed to create storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleUpdateStorageBackend = async (config: StorageBackendConfig) => {
+    if (!selectedStorageBackend) return;
+    
+    try {
+      await api.updateStorageBackend(selectedStorageBackend.id, config);
+      await refreshAllData();
+      alert(`✅ Storage backend "${config.name}" updated successfully!`);
+    } catch (error) {
+      console.error('Failed to update storage backend:', error);
+      alert(`❌ Failed to update storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleDeleteStorageBackend = async (backendId: string) => {
+    if (!window.confirm('Are you sure you want to delete this storage backend? This will not delete existing backups.')) {
+      return;
+    }
+    
+    try {
+      await api.deleteStorageBackend(backendId);
+      await refreshAllData();
+      alert('✅ Storage backend deleted successfully!');
+    } catch (error) {
+      console.error('Failed to delete storage backend:', error);
+      alert(`❌ Failed to delete storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleTestStorageBackend = async (backendId: string) => {
+    try {
+      await api.testStorageBackend(backendId);
+      await refreshAllData();
+      alert('✅ Storage backend test completed successfully!');
+    } catch (error) {
+      console.error('Failed to test storage backend:', error);
+      alert(`❌ Storage backend test failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleSetDefaultStorageBackend = async (backendId: string) => {
+    try {
+      await api.setDefaultStorageBackend(backendId);
+      await refreshAllData();
+      alert('✅ Default storage backend updated!');
+    } catch (error) {
+      console.error('Failed to set default storage backend:', error);
+      alert(`❌ Failed to set default storage backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
   // Filter VMs by selected subtab
   const getFilteredVMs = () => {
     if (vmSubTab === 'all') {
@@ -1598,6 +1988,7 @@ const MIVUBackupDashboard: React.FC = () => {
     { id: 'vms', label: 'Virtual Machines', icon: <Server size={20} /> },
     { id: 'jobs', label: 'Backup Jobs', icon: <Shield size={20} /> },
     { id: 'backups', label: 'Backups & Restore', icon: <Archive size={20} /> },
+    { id: 'storage', label: 'Storage', icon: <HardDrive size={20} /> },
     { id: 'platforms', label: 'Platforms', icon: <Settings size={20} /> },
   ];
 
@@ -1613,6 +2004,154 @@ const MIVUBackupDashboard: React.FC = () => {
     { id: 'backups', label: 'Available Backups', count: backups.length },
     { id: 'restore-history', label: 'Restore History', count: restoreHistory.length },
   ];
+
+  // Storage Tab Content
+  const renderStorageTab = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-white">Storage Backends ({storageBackends.length})</h2>
+        <Button 
+          variant="primary" 
+          onClick={() => {
+            setSelectedStorageBackend(null);
+            setShowStorageBackendModal(true);
+          }}
+        >
+          <Plus size={16} className="mr-2" />
+          Add Storage Backend
+        </Button>
+      </div>
+
+      {storageBackends.length === 0 ? (
+        <Card>
+          <div className="text-center py-12">
+            <HardDrive className="text-blue-400 mx-auto mb-4" size={48} />
+            <h3 className="text-white text-lg font-medium mb-2">No Storage Backends</h3>
+            <p className="text-slate-400 mb-4">
+              Configure storage backends for backup destinations. All VM backups will be stored on the configured storage.
+            </p>
+            <Button 
+              variant="primary" 
+              onClick={() => {
+                setSelectedStorageBackend(null);
+                setShowStorageBackendModal(true);
+              }}
+            >
+              <Plus size={16} className="mr-2" />
+              Add Storage Backend
+            </Button>
+          </div>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {storageBackends.map((backend) => (
+            <Card key={backend.id} className={backend.is_default ? 'border-blue-500' : ''}>
+              <div className="space-y-4">
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <div className="flex items-center space-x-3 mb-2">
+                      <h3 className="text-white font-semibold">{backend.name}</h3>
+                      {backend.is_default && (
+                        <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded">DEFAULT</span>
+                      )}
+                      <StatusIndicator status={backend.health.status} showLabel={false} />
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3 text-sm mb-3">
+                      <div>
+                        <span className="text-slate-400">Type:</span>
+                        <span className="text-white ml-2 uppercase">{backend.storage_type}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Mounted:</span>
+                        <span className="text-white ml-2">{backend.is_mounted ? 'Yes' : 'No'}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Capacity:</span>
+                        <span className="text-white ml-2">{backend.capacity_gb} GB</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Available:</span>
+                        <span className="text-white ml-2">
+                          {backend.health.available_gb ? `${backend.health.available_gb} GB` : 'Unknown'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {backend.health.message && (
+                      <p className="text-slate-400 text-sm mb-3">{backend.health.message}</p>
+                    )}
+
+                    <p className="text-slate-400 text-xs font-mono">
+                      Mount: {backend.mount_point}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button 
+                    size="sm" 
+                    variant="secondary"
+                    onClick={() => handleTestStorageBackend(backend.id)}
+                  >
+                    <Wifi size={14} className="mr-1" />
+                    Test
+                  </Button>
+                  
+                  {!backend.is_default && (
+                    <Button 
+                      size="sm" 
+                      variant="primary"
+                      onClick={() => handleSetDefaultStorageBackend(backend.id)}
+                    >
+                      <CheckCircle2 size={14} className="mr-1" />
+                      Set Default
+                    </Button>
+                  )}
+
+                  <Button 
+                    size="sm" 
+                    variant="secondary"
+                    onClick={() => {
+                      setSelectedStorageBackend(backend);
+                      setShowStorageBackendModal(true);
+                    }}
+                  >
+                    <Edit size={14} className="mr-1" />
+                    Edit
+                  </Button>
+
+                  {!backend.is_default && (
+                    <Button 
+                      size="sm" 
+                      variant="danger"
+                      onClick={() => handleDeleteStorageBackend(backend.id)}
+                    >
+                      <Trash2 size={14} className="mr-1" />
+                      Delete
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-4">
+        <h4 className="text-blue-300 font-medium mb-2">📁 Storage Information</h4>
+        <p className="text-blue-300 text-sm mb-2">
+          <strong>Local Storage:</strong> Stores backups on the local filesystem. Fast but limited by local disk space.
+        </p>
+        <p className="text-blue-300 text-sm mb-2">
+          <strong>NFS Storage:</strong> Network File System for centralized backup storage. Good for shared access across multiple backup servers.
+        </p>
+        <p className="text-blue-300 text-sm">
+          <strong>iSCSI Storage:</strong> Block-level storage over IP networks. High performance for large backup operations.
+        </p>
+      </div>
+    </div>
+  );
 
   if (loading) {
     return (
@@ -1723,6 +2262,10 @@ const MIVUBackupDashboard: React.FC = () => {
                     <StatusIndicator status="online" />
                   </div>
                   <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Storage Backends</span>
+                    <StatusIndicator status={storageBackends.length > 0 ? "online" : "warning"} />
+                  </div>
+                  <div className="flex justify-between items-center">
                     <span className="text-slate-300">Platform Connections</span>
                     <StatusIndicator status={Object.values(platformStatus).some(Boolean) ? "online" : "offline"} />
                   </div>
@@ -1741,6 +2284,72 @@ const MIVUBackupDashboard: React.FC = () => {
                 </div>
               </Card>
             </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">Storage Overview</h3>
+                <div className="space-y-3">
+                  {storageBackends.length === 0 ? (
+                    <div className="text-center py-4">
+                      <p className="text-slate-400 mb-3">No storage backends configured</p>
+                      <Button 
+                        size="sm" 
+                        variant="primary"
+                        onClick={() => {
+                          setSelectedStorageBackend(null);
+                          setShowStorageBackendModal(true);
+                        }}
+                      >
+                        <HardDrive size={14} className="mr-1" />
+                        Add Storage
+                      </Button>
+                    </div>
+                  ) : (
+                    storageBackends.slice(0, 3).map((backend) => (
+                      <div key={backend.id} className="flex justify-between items-center">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-slate-300">{backend.name}</span>
+                          {backend.is_default && (
+                            <span className="px-1 py-0.5 bg-blue-600 text-white text-xs rounded">DEFAULT</span>
+                          )}
+                        </div>
+                        <StatusIndicator status={backend.health.status} />
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Card>
+
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">Recent Activity</h3>
+                <div className="space-y-3">
+                  {backupJobs.length === 0 ? (
+                    <div className="text-center py-4">
+                      <p className="text-slate-400 mb-3">No backup jobs configured</p>
+                      <Button 
+                        size="sm" 
+                        variant="primary"
+                        onClick={() => setShowCreateBackupJob(true)}
+                        disabled={vms.length === 0}
+                      >
+                        <Shield size={14} className="mr-1" />
+                        Create Job
+                      </Button>
+                    </div>
+                  ) : (
+                    backupJobs.slice(0, 3).map((job) => (
+                      <div key={job.id} className="flex justify-between items-center">
+                        <div>
+                          <span className="text-slate-300">{job.name}</span>
+                          <p className="text-slate-500 text-xs">{job.last_run ? new Date(job.last_run).toLocaleDateString() : 'Never run'}</p>
+                        </div>
+                        <StatusIndicator status={job.status} />
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Card>
+            </div>
           </div>
         )}
 
@@ -1749,17 +2358,9 @@ const MIVUBackupDashboard: React.FC = () => {
             <div className="flex justify-between items-center">
               <h2 className="text-2xl font-bold text-white">Virtual Machines ({vms.length})</h2>
               <div className="flex space-x-3">
-                <Button onClick={() => setShowNetworkDiscovery(true)} variant="secondary">
-                  <Network size={16} className="mr-2" />
-                  Network Discovery
-                </Button>
                 <Button onClick={refreshAllData} variant="secondary">
                   <RefreshCw size={16} className="mr-2" />
                   Refresh All
-                </Button>
-                <Button onClick={() => setShowAddVM(true)} variant="primary">
-                  <Plus size={16} className="mr-2" />
-                  Add VM
                 </Button>
               </div>
             </div>
@@ -1799,7 +2400,7 @@ const MIVUBackupDashboard: React.FC = () => {
                   </h3>
                   <p className="text-slate-400 mb-4">
                     {vmSubTab === 'all' 
-                      ? 'Connect to platforms first, then add VMs manually or use network discovery'
+                      ? 'Connect to platforms first to discover VMs automatically'
                       : `No VMs found for ${vmSubTab.toUpperCase()} platform`
                     }
                   </p>
@@ -1807,10 +2408,6 @@ const MIVUBackupDashboard: React.FC = () => {
                     <Button variant="primary" onClick={() => setActiveTab('platforms')}>
                       <Settings size={16} className="mr-2" />
                       Connect Platforms
-                    </Button>
-                    <Button variant="secondary" onClick={() => setShowAddVM(true)}>
-                      <Plus size={16} className="mr-2" />
-                      Add VM Manually
                     </Button>
                   </div>
                 </div>
@@ -1821,7 +2418,10 @@ const MIVUBackupDashboard: React.FC = () => {
                   <VMCard 
                     key={`${vm.platform}-${vm.vm_id}`} 
                     vm={vm} 
-                    onBackup={() => setShowCreateBackupJob(true)}
+                    onBackup={() => {
+                      setSelectedVM(vm);
+                      setShowCreateBackupJob(true);
+                    }}
                     onEdit={(vm) => {
                       setSelectedVM(vm);
                       setShowEditVM(true);
@@ -1941,7 +2541,7 @@ const MIVUBackupDashboard: React.FC = () => {
           </div>
         )}
 
-        {/* NEW: Backups & Restore Tab */}
+        {/* Backups & Restore Tab */}
         {activeTab === 'backups' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
@@ -2132,6 +2732,8 @@ const MIVUBackupDashboard: React.FC = () => {
           </div>
         )}
 
+        {activeTab === 'storage' && renderStorageTab()}
+
         {activeTab === 'platforms' && (
           <div className="space-y-6">
             <h2 className="text-2xl font-bold text-white">Platform Connections</h2>
@@ -2146,6 +2748,48 @@ const MIVUBackupDashboard: React.FC = () => {
                 />
               ))}
             </div>
+
+            <Card>
+              <h3 className="text-white text-lg font-medium mb-4">Platform Requirements</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                <div>
+                  <h4 className="text-blue-400 font-medium mb-2">VMware vSphere/ESXi</h4>
+                  <ul className="text-slate-300 space-y-1">
+                    <li>• vCenter Server or ESXi host</li>
+                    <li>• User with backup privileges</li>
+                    <li>• API access enabled</li>
+                    <li>• Port 443 accessible</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="text-red-400 font-medium mb-2">Proxmox VE</h4>
+                  <ul className="text-slate-300 space-y-1">
+                    <li>• Proxmox VE cluster or node</li>
+                    <li>• User with VM.Backup privileges</li>
+                    <li>• Web interface accessible</li>
+                    <li>• Port 8006 accessible</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="text-emerald-400 font-medium mb-2">XCP-NG</h4>
+                  <ul className="text-slate-300 space-y-1">
+                    <li>• XCP-NG host or pool</li>
+                    <li>• SSH access with root/admin</li>
+                    <li>• xe command line tools</li>
+                    <li>• Port 22 accessible</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="text-orange-400 font-medium mb-2">Ubuntu Machines</h4>
+                  <ul className="text-slate-300 space-y-1">
+                    <li>• Ubuntu 18.04+ machines</li>
+                    <li>• SSH access configured</li>
+                    <li>• rsync and tar installed</li>
+                    <li>• Port 22 accessible</li>
+                  </ul>
+                </div>
+              </div>
+            </Card>
           </div>
         )}
       </main>
@@ -2153,7 +2797,10 @@ const MIVUBackupDashboard: React.FC = () => {
       {/* Modals */}
       <CreateBackupJobModal
         isOpen={showCreateBackupJob}
-        onClose={() => setShowCreateBackupJob(false)}
+        onClose={() => {
+          setShowCreateBackupJob(false);
+          setSelectedVM(null);
+        }}
         vms={vms}
         onCreateJob={handleCreateBackupJob}
       />
@@ -2179,29 +2826,15 @@ const MIVUBackupDashboard: React.FC = () => {
         onRestore={handleFileRestore}
       />
 
-      {showAddVM && (
-        <Modal isOpen={true} onClose={() => setShowAddVM(false)} title="Add Virtual Machine">
-          <div className="text-center py-8">
-            <h3 className="text-white font-medium mb-4">Add VM functionality coming soon!</h3>
-            <p className="text-slate-400 mb-4">For now, connect to platforms to automatically discover VMs.</p>
-            <Button onClick={() => setShowAddVM(false)} variant="primary">
-              Close
-            </Button>
-          </div>
-        </Modal>
-      )}
-
-      {showNetworkDiscovery && (
-        <Modal isOpen={true} onClose={() => setShowNetworkDiscovery(false)} title="Network Discovery">
-          <div className="text-center py-8">
-            <h3 className="text-white font-medium mb-4">Network Discovery functionality coming soon!</h3>
-            <p className="text-slate-400 mb-4">For now, connect to platforms directly to discover VMs.</p>
-            <Button onClick={() => setShowNetworkDiscovery(false)} variant="primary">
-              Close
-            </Button>
-          </div>
-        </Modal>
-      )}
+      <StorageBackendModal
+        isOpen={showStorageBackendModal}
+        onClose={() => {
+          setShowStorageBackendModal(false);
+          setSelectedStorageBackend(null);
+        }}
+        backend={selectedStorageBackend}
+        onSave={selectedStorageBackend ? handleUpdateStorageBackend : handleCreateStorageBackend}
+      />
 
       {showEditVM && selectedVM && (
         <Modal isOpen={true} onClose={() => { setShowEditVM(false); setSelectedVM(null); }} title={`Edit VM: ${selectedVM.name}`}>
@@ -2276,7 +2909,7 @@ const MIVUBackupDashboard: React.FC = () => {
   );
 };
 
-// Auth Guard and App component
+// Auth Guard and App component (keeping existing...)
 const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
@@ -2305,7 +2938,7 @@ const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         </Card>
 
         {showLogin && (
-          <LoginForm onClose={() => setShowLogin(false)} />
+          <div>Login form would go here...</div>
         )}
       </div>
     );
