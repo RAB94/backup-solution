@@ -1,4 +1,4 @@
-// Updated App.tsx with VM subtabs, functional backup jobs, and better stats
+// Updated App.tsx with comprehensive restore functionality and backup listing
 
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { 
@@ -22,10 +22,14 @@ import {
   LogOut,
   X,
   Network,
-  Edit
+  Edit,
+  RotateCcw,
+  FileText,
+  Clock,
+  Archive
 } from 'lucide-react';
 
-// Types (keeping existing types...)
+// Types (keeping existing types and adding new ones...)
 interface User {
   id: number;
   username: string;
@@ -75,6 +79,34 @@ interface BackupJob {
   created_at: string;
 }
 
+interface Backup {
+  backup_id: string;
+  job_id?: number;
+  vm_id: string;
+  vm_name?: string;
+  platform: string;
+  backup_type: string;
+  timestamp?: string;
+  created_at?: string;
+  size_mb: number;
+  file_path: string;
+  storage_backend_id?: string;
+  compressed?: boolean;
+  encrypted?: boolean;
+  status?: string;
+}
+
+interface RestoreHistoryItem {
+  id: number;
+  backup_id: string;
+  vm_id: string;
+  status: string;
+  start_time: string;
+  end_time?: string;
+  error_message?: string;
+  metadata?: any;
+}
+
 type PlatformType = 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu';
 
 interface DashboardStats {
@@ -93,7 +125,7 @@ interface PlatformStatus {
   ubuntu: boolean;
 }
 
-// API Service (keeping existing APIService...)
+// API Service with new restore methods
 class APIService {
   private baseURL: string;
   private authToken: string | null = null;
@@ -183,69 +215,7 @@ class APIService {
     return this.request('/auth/me');
   }
 
-  // VM and Platform methods (keeping existing...)
-  async getVMs(platform: string): Promise<VM[]> {
-    if (platform === 'ubuntu') {
-      return this.request('/ubuntu/machines');
-    }
-    return this.request(`/platforms/${platform}/vms`);
-  }
-
-  async discoverUbuntuMachines(networkRange: string = '192.168.1.0/24') {
-    return this.request('/ubuntu/discover', {
-      method: 'POST',
-      body: JSON.stringify({ network_range: networkRange }),
-    });
-  }
-
-  async connectUbuntuMachine(connectionData: any) {
-    return this.request('/ubuntu/connect', {
-      method: 'POST',
-      body: JSON.stringify(connectionData),
-    });
-  }
-
-  async addVMManually(vmData: any) {
-    return this.request('/vms/manual', {
-      method: 'POST',
-      body: JSON.stringify(vmData),
-    });
-  }
-
-  async updateVM(vmId: string, vmData: any) {
-    return this.request(`/vms/${vmId}`, {
-      method: 'PUT',
-      body: JSON.stringify(vmData),
-    });
-  }
-
-  async scanVMByIP(ip: string, credentials: any) {
-    return this.request('/vms/scan', {
-      method: 'POST',
-      body: JSON.stringify({ ip, ...credentials }),
-    });
-  }
-
-  async refreshPlatformVMs(platform: string) {
-    return this.request(`/platforms/${platform}/refresh`, {
-      method: 'POST',
-    });
-  }
-
-  async backupUbuntuMachine(machineId: string, config: any) {
-    return this.request(`/ubuntu/${machineId}/backup`, {
-      method: 'POST',
-      body: JSON.stringify(config),
-    });
-  }
-
-  async installUbuntuAgent(machineId: string) {
-    return this.request(`/ubuntu/${machineId}/install-agent`, {
-      method: 'POST',
-    });
-  }
-
-  // UPDATED: Backup Jobs methods
+  // Backup Jobs methods (keeping existing...)
   async getBackupJobs(): Promise<BackupJob[]> {
     return this.request('/backup-jobs');
   }
@@ -280,21 +250,54 @@ class APIService {
     });
   }
 
-  async discoverNetworkRange(networkRange: string) {
-    return this.request('/discovery/network', {
-      method: 'POST',
-      body: JSON.stringify({ network_range: networkRange }),
-    });
-  }
-
-  // UPDATED: Get all VMs from database instead of individual platforms
   async getAllVMs(): Promise<VM[]> {
     return this.request('/vms');
   }
 
-  // NEW: Get platform connection status
   async getPlatformStatus() {
     return this.request('/platforms/status');
+  }
+
+  // NEW: Backup and Restore methods
+  async getAllBackups(): Promise<Backup[]> {
+    return this.request('/storage/backups');
+  }
+
+  async getRestoreHistory(): Promise<RestoreHistoryItem[]> {
+    return this.request('/restore/history');
+  }
+
+  async instantRestoreVM(backupId: string, targetPlatform: string, restoreConfig: any) {
+    return this.request('/restore/instant', {
+      method: 'POST',
+      body: JSON.stringify({
+        backup_id: backupId,
+        target_platform: targetPlatform,
+        restore_config: restoreConfig
+      }),
+    });
+  }
+
+  async fileRestore(backupId: string, filePaths: string[], targetPath: string, vmId?: string) {
+    return this.request('/restore/files', {
+      method: 'POST',
+      body: JSON.stringify({
+        backup_id: backupId,
+        file_paths: filePaths,
+        target_path: targetPath,
+        vm_id: vmId
+      }),
+    });
+  }
+
+  async getStorageBackends() {
+    return this.request('/storage/backends');
+  }
+
+  async installUbuntuAgent(vmId: string) {
+    return this.request(`/ubuntu/${vmId}/install-agent`, {
+      method: 'POST',
+    });
   }
 }
 
@@ -376,86 +379,7 @@ const useAuth = () => {
   return context;
 };
 
-// Login Form Component
-const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const { login } = useAuth();
-
-  const handleSubmit = async () => {
-    setLoading(true);
-    setError('');
-    
-    if (!username || !password) {
-      setError('Please enter both username and password');
-      setLoading(false);
-      return;
-    }
-    
-    try {
-      const success = await login(username, password);
-      
-      if (success) {
-        onClose();
-      } else {
-        setError('Invalid credentials');
-      }
-    } catch (err: any) {
-      setError('Login failed. Please check your connection and try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Modal isOpen={true} onClose={onClose} title="Login">
-      <div className="space-y-4">
-        {error && (
-          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
-            {error}
-          </div>
-        )}
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter username"
-            disabled={loading}
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
-            placeholder="Enter password"
-            disabled={loading}
-            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
-          />
-        </div>
-
-        <div className="flex justify-end space-x-3">
-          <Button onClick={onClose} variant="secondary" disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
-            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
-            {loading ? 'Logging in...' : 'Login'}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
+// UI Components (keeping existing Card, Button, Modal, StatusIndicator, MetricCard...)
 const Card: React.FC<{
   children: React.ReactNode;
   className?: string;
@@ -551,20 +475,21 @@ const StatusIndicator: React.FC<{
   const getStatusConfig = (status: string) => {
     switch (status.toLowerCase()) {
       case 'completed':
+      case 'success':
       case 'poweredon':
+        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'SUCCESS' };
       case 'running':
-        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'ONLINE' };
       case 'in progress':
-        return { color: 'text-amber-400', bg: 'bg-amber-400', label: 'ACTIVE' };
+        return { color: 'text-amber-400', bg: 'bg-amber-400', label: 'RUNNING' };
       case 'failed':
       case 'error':
-        return { color: 'text-red-400', bg: 'bg-red-400', label: 'ERROR' };
+        return { color: 'text-red-400', bg: 'bg-red-400', label: 'FAILED' };
       case 'pending':
       case 'scheduled':
         return { color: 'text-yellow-400', bg: 'bg-yellow-400', label: 'PENDING' };
       case 'paused':
       case 'stopped':
-        return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'OFFLINE' };
+        return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'STOPPED' };
       default:
         return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'UNKNOWN' };
     }
@@ -610,7 +535,226 @@ const MetricCard: React.FC<{
   </Card>
 );
 
-// NEW: Backup Job Creation Modal
+// NEW: Instant Restore Modal
+const InstantRestoreModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  backup: Backup | null;
+  vms: VM[];
+  onRestore: (backupId: string, targetPlatform: string, config: any) => void;
+}> = ({ isOpen, onClose, backup, vms, onRestore }) => {
+  const [restoreConfig, setRestoreConfig] = useState({
+    target_platform: 'vmware',
+    vm_name: '',
+    target_host: '',
+    datastore: '',
+    network: ''
+  });
+
+  const handleSubmit = () => {
+    if (!backup) return;
+    
+    onRestore(backup.backup_id, restoreConfig.target_platform, restoreConfig);
+    onClose();
+    setRestoreConfig({
+      target_platform: 'vmware',
+      vm_name: '',
+      target_host: '',
+      datastore: '',
+      network: ''
+    });
+  };
+
+  if (!backup) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Instant VM Restore" size="lg">
+      <div className="space-y-6">
+        <div className="bg-slate-700 rounded p-4">
+          <h4 className="text-white font-medium mb-3">Backup Details</h4>
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <span className="text-slate-300">VM:</span>
+              <span className="text-white ml-2">{backup.vm_name || backup.vm_id}</span>
+            </div>
+            <div>
+              <span className="text-slate-300">Platform:</span>
+              <span className="text-white ml-2">{backup.platform.toUpperCase()}</span>
+            </div>
+            <div>
+              <span className="text-slate-300">Type:</span>
+              <span className="text-white ml-2">{backup.backup_type}</span>
+            </div>
+            <div>
+              <span className="text-slate-300">Size:</span>
+              <span className="text-white ml-2">{Math.round(backup.size_mb / 1024)} GB</span>
+            </div>
+            <div>
+              <span className="text-slate-300">Created:</span>
+              <span className="text-white ml-2">
+                {backup.created_at ? new Date(backup.created_at).toLocaleDateString() : 'Unknown'}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-300">Encrypted:</span>
+              <span className="text-white ml-2">{backup.encrypted ? 'Yes' : 'No'}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Target Platform</label>
+            <select
+              value={restoreConfig.target_platform}
+              onChange={(e) => setRestoreConfig({...restoreConfig, target_platform: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500 focus:outline-none transition-colors"
+            >
+              <option value="vmware">VMware vSphere</option>
+              <option value="proxmox">Proxmox VE</option>
+              <option value="xcpng">XCP-NG</option>
+              <option value="ubuntu">Ubuntu Machine</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">New VM Name</label>
+            <input
+              type="text"
+              value={restoreConfig.vm_name}
+              onChange={(e) => setRestoreConfig({...restoreConfig, vm_name: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder={`Restored-${backup.vm_name || backup.vm_id}`}
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Target Host/Datastore</label>
+            <input
+              type="text"
+              value={restoreConfig.datastore}
+              onChange={(e) => setRestoreConfig({...restoreConfig, datastore: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="datastore1"
+            />
+          </div>
+          <div>
+            <label className="block text-slate-300 text-sm font-medium mb-2">Network</label>
+            <input
+              type="text"
+              value={restoreConfig.network}
+              onChange={(e) => setRestoreConfig({...restoreConfig, network: e.target.value})}
+              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+              placeholder="VM Network"
+            />
+          </div>
+        </div>
+
+        <div className="bg-blue-900 bg-opacity-30 border border-blue-500 rounded p-3">
+          <p className="text-blue-300 text-sm">
+            <strong>Instant Restore:</strong> This will create a new VM from the backup data. 
+            The process typically takes 1-5 minutes depending on the backup size.
+          </p>
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} variant="success">
+            <RotateCcw size={16} className="mr-2" />
+            Start Restore
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// NEW: File Restore Modal
+const FileRestoreModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  backup: Backup | null;
+  onRestore: (backupId: string, filePaths: string[], targetPath: string) => void;
+}> = ({ isOpen, onClose, backup, onRestore }) => {
+  const [filePaths, setFilePaths] = useState<string>('');
+  const [targetPath, setTargetPath] = useState<string>('');
+
+  const handleSubmit = () => {
+    if (!backup || !filePaths || !targetPath) return;
+    
+    const pathsArray = filePaths.split('\n').filter(path => path.trim()).map(path => path.trim());
+    onRestore(backup.backup_id, pathsArray, targetPath);
+    onClose();
+    setFilePaths('');
+    setTargetPath('');
+  };
+
+  if (!backup) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="File-Level Restore" size="lg">
+      <div className="space-y-6">
+        <div className="bg-slate-700 rounded p-4">
+          <h4 className="text-white font-medium mb-3">Backup: {backup.vm_name || backup.vm_id}</h4>
+          <div className="text-sm text-slate-300">
+            Platform: {backup.platform.toUpperCase()} | 
+            Type: {backup.backup_type} | 
+            Size: {Math.round(backup.size_mb / 1024)} GB
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">File Paths to Restore</label>
+          <textarea
+            value={filePaths}
+            onChange={(e) => setFilePaths(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors font-mono text-sm"
+            placeholder={`/etc/config.conf\n/home/user/documents/\n/var/log/application.log`}
+            rows={6}
+          />
+          <p className="text-slate-400 text-xs mt-1">Enter one file or directory path per line</p>
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Target Restore Path</label>
+          <input
+            type="text"
+            value={targetPath}
+            onChange={(e) => setTargetPath(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="/restore/location"
+          />
+        </div>
+
+        <div className="bg-amber-900 bg-opacity-30 border border-amber-500 rounded p-3">
+          <p className="text-amber-300 text-sm">
+            <strong>File Restore:</strong> Individual files will be extracted from the backup and copied to the target location. 
+            This operation may take several minutes for large files.
+          </p>
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary">
+            Cancel
+          </Button>
+          <Button 
+            onClick={handleSubmit} 
+            variant="success"
+            disabled={!filePaths.trim() || !targetPath.trim()}
+          >
+            <FileText size={16} className="mr-2" />
+            Restore Files
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// NEW: Create Backup Job Modal (keeping existing implementation...)
 const CreateBackupJobModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -820,7 +964,88 @@ const CreateBackupJobModal: React.FC<{
   );
 };
 
-// VM Card component (keeping existing but updated...)
+// Login Form Component (keeping existing...)
+const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const { login } = useAuth();
+
+  const handleSubmit = async () => {
+    setLoading(true);
+    setError('');
+    
+    if (!username || !password) {
+      setError('Please enter both username and password');
+      setLoading(false);
+      return;
+    }
+    
+    try {
+      const success = await login(username, password);
+      
+      if (success) {
+        onClose();
+      } else {
+        setError('Invalid credentials');
+      }
+    } catch (err: any) {
+      setError('Login failed. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title="Login">
+      <div className="space-y-4">
+        {error && (
+          <div className="p-3 bg-red-900 bg-opacity-50 border border-red-500 rounded text-red-300 text-sm">
+            {error}
+          </div>
+        )}
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Username</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter username"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-slate-300 text-sm font-medium mb-2">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:border-blue-500 focus:outline-none transition-colors"
+            placeholder="Enter password"
+            disabled={loading}
+            onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
+          />
+        </div>
+
+        <div className="flex justify-end space-x-3">
+          <Button onClick={onClose} variant="secondary" disabled={loading}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} variant="primary" disabled={loading}>
+            {loading ? <RefreshCw size={16} className="mr-2 animate-spin" /> : <LogIn size={16} className="mr-2" />}
+            {loading ? 'Logging in...' : 'Login'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// VM Card component (keeping existing...)
 const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) => void; onMonitor?: (vm: VM) => void }> = ({ vm, onBackup, onEdit, onMonitor }) => {
   const getPlatformIcon = (platform: string) => {
     switch (platform) {
@@ -921,7 +1146,13 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) =
             <Button 
               size="sm" 
               variant="secondary"
-              onClick={() => api.installUbuntuAgent(vm.vm_id)}
+              onClick={() => {
+                api.installUbuntuAgent(vm.vm_id).then(() => {
+                  alert('Ubuntu agent installation started');
+                }).catch((error) => {
+                  alert('Failed to install Ubuntu agent: ' + error.message);
+                });
+              }}
             >
               <Download size={14} className="mr-1" />
               Agent
@@ -933,7 +1164,7 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) =
   );
 };
 
-// Platform Connector component (keeping existing...)
+// Platform Connector component (keeping existing implementation but simplified...)
 const PlatformConnector: React.FC<{
   platform: PlatformType;
   onConnect: (platform: string, data: any) => void;
@@ -1114,11 +1345,12 @@ const PlatformConnector: React.FC<{
   );
 };
 
-// Main Dashboard Component
+// Main Dashboard Component with NEW Restore Tab
 const MIVUBackupDashboard: React.FC = () => {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'platforms'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'backups' | 'platforms'>('dashboard');
   const [vmSubTab, setVmSubTab] = useState<'all' | 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu'>('all');
+  const [backupSubTab, setBackupSubTab] = useState<'backups' | 'restore-history'>('backups');
   const [stats, setStats] = useState<DashboardStats>({
     total_backup_jobs: 0,
     running_jobs: 0,
@@ -1129,12 +1361,17 @@ const MIVUBackupDashboard: React.FC = () => {
   });
   const [vms, setVMs] = useState<VM[]>([]);
   const [backupJobs, setBackupJobs] = useState<BackupJob[]>([]);
+  const [backups, setBackups] = useState<Backup[]>([]);
+  const [restoreHistory, setRestoreHistory] = useState<RestoreHistoryItem[]>([]);
   const [showAddVM, setShowAddVM] = useState(false);
   const [showNetworkDiscovery, setShowNetworkDiscovery] = useState(false);
   const [showEditVM, setShowEditVM] = useState(false);
   const [showMonitorVM, setShowMonitorVM] = useState(false);
   const [showCreateBackupJob, setShowCreateBackupJob] = useState(false);
+  const [showInstantRestore, setShowInstantRestore] = useState(false);
+  const [showFileRestore, setShowFileRestore] = useState(false);
   const [selectedVM, setSelectedVM] = useState<VM | null>(null);
+  const [selectedBackup, setSelectedBackup] = useState<Backup | null>(null);
   const [loading, setLoading] = useState(true);
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus>({
     vmware: false,
@@ -1151,8 +1388,8 @@ const MIVUBackupDashboard: React.FC = () => {
   const loadInitialData = async () => {
     setLoading(true);
     try {
-      // Load stats, VMs, and backup jobs
-      const [statsData, allVMs, jobs] = await Promise.all([
+      // Load stats, VMs, backup jobs, and backups
+      const [statsData, allVMs, jobs, allBackups, restoreHistoryData] = await Promise.all([
         api.getStatistics().catch(() => ({
           total_backup_jobs: 0,
           running_jobs: 0,
@@ -1162,12 +1399,16 @@ const MIVUBackupDashboard: React.FC = () => {
           success_rate: '0%'
         })),
         api.getAllVMs().catch(() => []),
-        api.getBackupJobs().catch(() => [])
+        api.getBackupJobs().catch(() => []),
+        api.getAllBackups().catch(() => []),
+        api.getRestoreHistory().catch(() => [])
       ]);
 
       setStats(statsData);
       setVMs(allVMs);
       setBackupJobs(jobs);
+      setBackups(allBackups);
+      setRestoreHistory(restoreHistoryData);
       
     } catch (error) {
       console.error('Failed to load initial data:', error);
@@ -1186,18 +1427,27 @@ const MIVUBackupDashboard: React.FC = () => {
     }
   };
 
-  const refreshAllVMs = async () => {
+  const refreshAllData = async () => {
     try {
-      const allVMs = await api.getAllVMs();
-      setVMs(allVMs);
+      const [allVMs, updatedStats, jobs, allBackups, restoreHistoryData] = await Promise.all([
+        api.getAllVMs(),
+        api.getStatistics(),
+        api.getBackupJobs(),
+        api.getAllBackups(),
+        api.getRestoreHistory()
+      ]);
       
-      // Reload platform status and stats
-      await loadPlatformStatus();
-      const updatedStats = await api.getStatistics();
+      setVMs(allVMs);
       setStats(updatedStats);
+      setBackupJobs(jobs);
+      setBackups(allBackups);
+      setRestoreHistory(restoreHistoryData);
+      
+      // Reload platform status
+      await loadPlatformStatus();
       
     } catch (error) {
-      console.error('Failed to refresh VMs:', error);
+      console.error('Failed to refresh data:', error);
     }
   };
 
@@ -1209,19 +1459,12 @@ const MIVUBackupDashboard: React.FC = () => {
         port: connectionData.port 
       });
       
-      if (platform === 'ubuntu') {
-        await api.connectUbuntuMachine(connectionData);
-      } else {
-        await api.connectPlatform(platform, connectionData);
-      }
+      await api.connectPlatform(platform, connectionData);
       
       alert(`✅ Successfully connected to ${platform.toUpperCase()}!`);
       
       // Refresh all data after successful connection
-      await Promise.all([
-        refreshAllVMs(),
-        loadPlatformStatus()
-      ]);
+      await refreshAllData();
       
     } catch (error) {
       console.error('Failed to connect:', error);
@@ -1310,6 +1553,38 @@ const MIVUBackupDashboard: React.FC = () => {
     }
   };
 
+  const handleInstantRestore = async (backupId: string, targetPlatform: string, restoreConfig: any) => {
+    try {
+      await api.instantRestoreVM(backupId, targetPlatform, restoreConfig);
+      
+      alert('✅ Instant restore started successfully! Check the restore history for progress.');
+      
+      // Refresh restore history
+      const newRestoreHistory = await api.getRestoreHistory();
+      setRestoreHistory(newRestoreHistory);
+      
+    } catch (error) {
+      console.error('Failed to start instant restore:', error);
+      alert(`❌ Failed to start instant restore: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleFileRestore = async (backupId: string, filePaths: string[], targetPath: string) => {
+    try {
+      await api.fileRestore(backupId, filePaths, targetPath);
+      
+      alert('✅ File restore started successfully! Check the restore history for progress.');
+      
+      // Refresh restore history
+      const newRestoreHistory = await api.getRestoreHistory();
+      setRestoreHistory(newRestoreHistory);
+      
+    } catch (error) {
+      console.error('Failed to start file restore:', error);
+      alert(`❌ Failed to start file restore: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
   // Filter VMs by selected subtab
   const getFilteredVMs = () => {
     if (vmSubTab === 'all') {
@@ -1322,6 +1597,7 @@ const MIVUBackupDashboard: React.FC = () => {
     { id: 'dashboard', label: 'Dashboard', icon: <Terminal size={20} /> },
     { id: 'vms', label: 'Virtual Machines', icon: <Server size={20} /> },
     { id: 'jobs', label: 'Backup Jobs', icon: <Shield size={20} /> },
+    { id: 'backups', label: 'Backups & Restore', icon: <Archive size={20} /> },
     { id: 'platforms', label: 'Platforms', icon: <Settings size={20} /> },
   ];
 
@@ -1331,6 +1607,11 @@ const MIVUBackupDashboard: React.FC = () => {
     { id: 'proxmox', label: 'Proxmox', count: vms.filter(vm => vm.platform === 'proxmox').length },
     { id: 'xcpng', label: 'XCP-NG', count: vms.filter(vm => vm.platform === 'xcpng').length },
     { id: 'ubuntu', label: 'Ubuntu', count: vms.filter(vm => vm.platform === 'ubuntu').length },
+  ];
+
+  const backupSubTabs = [
+    { id: 'backups', label: 'Available Backups', count: backups.length },
+    { id: 'restore-history', label: 'Restore History', count: restoreHistory.length },
   ];
 
   if (loading) {
@@ -1418,9 +1699,9 @@ const MIVUBackupDashboard: React.FC = () => {
                 icon={<Shield />}
               />
               <MetricCard
-                title="Storage Used"
-                value={stats.total_backups_size}
-                icon={<HardDrive />}
+                title="Total Backups"
+                value={backups.length.toString()}
+                icon={<Archive />}
               />
               <MetricCard
                 title="Success Rate"
@@ -1472,7 +1753,7 @@ const MIVUBackupDashboard: React.FC = () => {
                   <Network size={16} className="mr-2" />
                   Network Discovery
                 </Button>
-                <Button onClick={refreshAllVMs} variant="secondary">
+                <Button onClick={refreshAllData} variant="secondary">
                   <RefreshCw size={16} className="mr-2" />
                   Refresh All
                 </Button>
@@ -1660,6 +1941,197 @@ const MIVUBackupDashboard: React.FC = () => {
           </div>
         )}
 
+        {/* NEW: Backups & Restore Tab */}
+        {activeTab === 'backups' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h2 className="text-2xl font-bold text-white">Backups & Restore</h2>
+              <Button onClick={refreshAllData} variant="secondary">
+                <RefreshCw size={16} className="mr-2" />
+                Refresh
+              </Button>
+            </div>
+
+            {/* Backup Subtabs */}
+            <div className="border-b border-slate-700">
+              <div className="flex space-x-8">
+                {backupSubTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setBackupSubTab(tab.id as any)}
+                    className={`flex items-center space-x-2 py-3 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
+                      backupSubTab === tab.id
+                        ? 'border-blue-400 text-blue-400'
+                        : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-500'
+                    }`}
+                  >
+                    <span>{tab.label}</span>
+                    <span className={`px-2 py-1 rounded-full text-xs ${
+                      backupSubTab === tab.id 
+                        ? 'bg-blue-400 text-slate-900' 
+                        : 'bg-slate-700 text-slate-300'
+                    }`}>
+                      {tab.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {backupSubTab === 'backups' ? (
+              <div className="space-y-4">
+                {backups.length === 0 ? (
+                  <Card>
+                    <div className="text-center py-12">
+                      <Archive className="text-blue-400 mx-auto mb-4" size={48} />
+                      <h3 className="text-white text-lg font-medium mb-2">No Backups Available</h3>
+                      <p className="text-slate-400 mb-4">
+                        Create and run backup jobs to see available backups here
+                      </p>
+                      <Button variant="primary" onClick={() => setActiveTab('jobs')}>
+                        <Shield size={16} className="mr-2" />
+                        View Backup Jobs
+                      </Button>
+                    </div>
+                  </Card>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    {backups.map((backup, index) => (
+                      <Card key={`${backup.backup_id}-${index}`}>
+                        <div className="space-y-4">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <h3 className="text-white font-semibold">
+                                {backup.vm_name || backup.vm_id}
+                              </h3>
+                              <p className="text-slate-400 text-sm">
+                                ID: {backup.backup_id.slice(0, 8)}...
+                              </p>
+                            </div>
+                            <span className="px-2 py-1 bg-slate-700 border border-blue-500 rounded text-xs font-mono text-blue-400">
+                              {backup.platform.toUpperCase()}
+                            </span>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-3 text-sm">
+                            <div>
+                              <span className="text-slate-400">Type:</span>
+                              <span className="text-white ml-2">{backup.backup_type}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">Size:</span>
+                              <span className="text-white ml-2">{Math.round(backup.size_mb / 1024)} GB</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">Created:</span>
+                              <span className="text-white ml-2">
+                                {backup.created_at ? new Date(backup.created_at).toLocaleDateString() : 'Unknown'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">Storage:</span>
+                              <span className="text-white ml-2">
+                                {backup.storage_backend_id || 'Local'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex space-x-2">
+                            <Button 
+                              size="sm" 
+                              variant="success"
+                              onClick={() => {
+                                setSelectedBackup(backup);
+                                setShowInstantRestore(true);
+                              }}
+                            >
+                              <RotateCcw size={14} className="mr-1" />
+                              Instant Restore
+                            </Button>
+                            <Button 
+                              size="sm" 
+                              variant="secondary"
+                              onClick={() => {
+                                setSelectedBackup(backup);
+                                setShowFileRestore(true);
+                              }}
+                            >
+                              <FileText size={14} className="mr-1" />
+                              File Restore
+                            </Button>
+                          </div>
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {restoreHistory.length === 0 ? (
+                  <Card>
+                    <div className="text-center py-12">
+                      <Clock className="text-blue-400 mx-auto mb-4" size={48} />
+                      <h3 className="text-white text-lg font-medium mb-2">No Restore History</h3>
+                      <p className="text-slate-400 mb-4">
+                        Restore operations will appear here
+                      </p>
+                    </div>
+                  </Card>
+                ) : (
+                  <div className="space-y-4">
+                    {restoreHistory.map((restore) => (
+                      <Card key={restore.id}>
+                        <div className="flex justify-between items-start">
+                          <div className="flex-1">
+                            <div className="flex items-center space-x-3 mb-2">
+                              <h3 className="text-white font-semibold">
+                                Restore: {restore.backup_id.slice(0, 8)}...
+                              </h3>
+                              <StatusIndicator status={restore.status} />
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                              <div>
+                                <span className="text-slate-400">VM:</span>
+                                <span className="text-white ml-2">{restore.vm_id}</span>
+                              </div>
+                              <div>
+                                <span className="text-slate-400">Started:</span>
+                                <span className="text-white ml-2">
+                                  {new Date(restore.start_time).toLocaleDateString()}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-slate-400">Completed:</span>
+                                <span className="text-white ml-2">
+                                  {restore.end_time ? new Date(restore.end_time).toLocaleDateString() : 'In Progress'}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-slate-400">Operation:</span>
+                                <span className="text-white ml-2">
+                                  {restore.metadata?.operation || 'Unknown'}
+                                </span>
+                              </div>
+                            </div>
+                            {restore.error_message && (
+                              <div className="mt-2">
+                                <p className="text-red-400 text-sm">
+                                  Error: {restore.error_message}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === 'platforms' && (
           <div className="space-y-6">
             <h2 className="text-2xl font-bold text-white">Platform Connections</h2>
@@ -1684,6 +2156,27 @@ const MIVUBackupDashboard: React.FC = () => {
         onClose={() => setShowCreateBackupJob(false)}
         vms={vms}
         onCreateJob={handleCreateBackupJob}
+      />
+
+      <InstantRestoreModal
+        isOpen={showInstantRestore}
+        onClose={() => {
+          setShowInstantRestore(false);
+          setSelectedBackup(null);
+        }}
+        backup={selectedBackup}
+        vms={vms}
+        onRestore={handleInstantRestore}
+      />
+
+      <FileRestoreModal
+        isOpen={showFileRestore}
+        onClose={() => {
+          setShowFileRestore(false);
+          setSelectedBackup(null);
+        }}
+        backup={selectedBackup}
+        onRestore={handleFileRestore}
       />
 
       {showAddVM && (
@@ -1783,7 +2276,7 @@ const MIVUBackupDashboard: React.FC = () => {
   );
 };
 
-// Auth Guard and App component (keeping existing...)
+// Auth Guard and App component
 const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuth();
   const [showLogin, setShowLogin] = useState(false);

@@ -1,4 +1,4 @@
-# Updated backup_engine.py - Fixed Storage Manager Integration
+# Updated backup_engine.py - Fixed ALL variable references
 import asyncio
 import logging
 import hashlib
@@ -119,11 +119,11 @@ class BackupEngine:
                 "backup_id": backup_id,
                 "size_mb": backup_size,
                 "path": final_storage_path,
-                "vm_name": vm_details.get("name", job.vm_id),
-                "platform": job.platform.value,
-                "backup_type": job.backup_type.value,
-                "compression_enabled": job.compression_enabled,
-                "encryption_enabled": job.encryption_enabled
+                "vm_name": vm_details.get("name", backup_job.vm_id),
+                "platform": backup_job.platform.value,
+                "backup_type": backup_job.backup_type.value,
+                "compression_enabled": backup_job.compression_enabled,
+                "encryption_enabled": backup_job.encryption_enabled
             }
             
         except Exception as e:
@@ -133,29 +133,29 @@ class BackupEngine:
                 "error": str(e)
             }
     
-    async def _perform_backup(self, connector, job, vm_details, backup_dir, snapshot_id):
+    async def _perform_backup(self, connector, backup_job, vm_details, backup_dir, snapshot_id):
         """Perform the actual backup operation"""
-        logger.info(f"Performing {job.backup_type.value} backup")
+        logger.info(f"Performing {backup_job.backup_type.value} backup")
         
-        if job.backup_type == BackupType.FULL:
-            return await self._full_backup(connector, job, vm_details, backup_dir)
-        elif job.backup_type == BackupType.INCREMENTAL:
-            return await self._incremental_backup(connector, job, vm_details, backup_dir)
+        if backup_job.backup_type == BackupType.FULL:
+            return await self._full_backup(connector, backup_job, vm_details, backup_dir)
+        elif backup_job.backup_type == BackupType.INCREMENTAL:
+            return await self._incremental_backup(connector, backup_job, vm_details, backup_dir)
         else:
-            raise Exception(f"Backup type {job.backup_type} not implemented")
+            raise Exception(f"Backup type {backup_job.backup_type} not implemented")
     
-    async def _full_backup(self, connector, job, vm_details, backup_dir):
+    async def _full_backup(self, connector, backup_job, vm_details, backup_dir):
         """Perform full VM backup"""
         logger.info("Starting full backup")
         
         # Export VM
         export_path = str(backup_dir)
-        exported_file = await connector.export_vm(job.vm_id, export_path)
+        exported_file = await connector.export_vm(backup_job.vm_id, export_path)
         
         logger.info(f"Full backup completed: {exported_file}")
         return {"type": "full", "file": exported_file}
     
-    async def _incremental_backup(self, connector, job, vm_details, backup_dir):
+    async def _incremental_backup(self, connector, backup_job, vm_details, backup_dir):
         """Perform incremental backup"""
         logger.info("Starting incremental backup")
         
@@ -169,7 +169,7 @@ class BackupEngine:
         await asyncio.sleep(2)
         with open(incremental_file, 'wb') as f:
             # Mock changed data
-            f.write(b"Incremental backup data for VM " + job.vm_id.encode())
+            f.write(b"Incremental backup data for VM " + backup_job.vm_id.encode())
         
         logger.info("Incremental backup completed")
         return {"type": "incremental", "file": str(incremental_file)}

@@ -1,4 +1,4 @@
-# Updated main.py with automatic VM discovery and better persistence, storage management, and restore features
+# Updated main.py with restore endpoints and backup listing functionality
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +60,7 @@ class ConnectionEncryption:
 
 encryption = ConnectionEncryption()
 
-# Platform Connection Manager
+# Platform Connection Manager (keeping existing implementation...)
 class PlatformConnectionManager:
     def __init__(self, connectors: Dict[PlatformType, Any]):
         self.connectors = connectors
@@ -407,7 +407,7 @@ async def get_stored_connections(db: Session = Depends(get_db)):
     connection_manager = app.state.connection_manager
     return await connection_manager.get_stored_connections(db)
 
-# UPDATED: Platform Management with automatic VM discovery
+# Platform Management with automatic VM discovery (keeping existing implementation...)
 @app.post("/api/v1/platforms/{platform_type}/connect")
 async def connect_platform(
     platform_type: PlatformType,
@@ -560,7 +560,7 @@ async def disconnect_platform(
         logger.error(f"Failed to disconnect from {platform_type}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# NEW: Get all VMs from database
+# VM Management Endpoints
 @app.get("/api/v1/vms")
 async def get_all_vms(db: Session = Depends(get_db)) -> List[dict]:
     """Get all VMs from database"""
@@ -587,7 +587,7 @@ async def get_all_vms(db: Session = Depends(get_db)) -> List[dict]:
         logger.error(f"Error getting all VMs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# UPDATED: Backup Jobs with proper repository handling
+# Backup Jobs Management (keeping existing implementation...)
 @app.post("/api/v1/backup-jobs")
 async def create_backup_job(
     job_data: dict,
@@ -750,6 +750,14 @@ async def run_backup_with_status_updates(job_id: int, backup_record_id: int):
             backup_record.end_time = datetime.now()
             backup_record.size_mb = result.get("size_mb", 0)
             backup_record.file_path = result.get("path", "")
+            backup_record.record_metadata = {
+                "backup_id": result.get("backup_id"),
+                "vm_name": result.get("vm_name"),
+                "platform": result.get("platform"),
+                "backup_type": result.get("backup_type"),
+                "compressed": result.get("compression_enabled"),
+                "encrypted": result.get("encryption_enabled")
+            }
             logger.info(f"Backup job {job_id} completed successfully")
         else:
             job.status = BackupJobStatus.FAILED
@@ -805,7 +813,7 @@ async def delete_backup_job(
         logger.error(f"Error deleting backup job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Storage Management Endpoints
+# NEW: Storage and Backup Management Endpoints
 @app.get("/api/v1/storage/backends")
 async def list_storage_backends():
     """List all configured storage backends"""
@@ -831,145 +839,65 @@ async def list_storage_backends():
         logger.error(f"Error listing storage backends: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/v1/storage/backends")
-async def create_storage_backend(
-    backend_config: dict,
-    db: Session = Depends(get_db)
-):
-    """Create and configure a new storage backend"""
-    try:
-        storage_manager = app.state.storage_manager
-        
-        # Validate configuration
-        required_fields = ['name', 'storage_type']
-        for field in required_fields:
-            if field not in backend_config:
-                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-        
-        # Create backend
-        backend = storage_manager.create_backend_from_config(backend_config)
-        backend_id = f"{backend_config['storage_type']}_{backend_config['name'].replace(' ', '_').lower()}"
-        
-        # Test connection
-        test_result = await backend.test_connection()
-        if test_result["status"] == "error":
-            raise HTTPException(status_code=400, detail=f"Storage backend test failed: {test_result['message']}")
-        
-        # Connect to backend
-        connected = await backend.connect()
-        if not connected:
-            raise HTTPException(status_code=400, detail="Failed to connect to storage backend")
-        
-        # Register backend
-        storage_manager.register_backend(backend_id, backend)
-        
-        # Save to database
-        db_backend = BackupRepository(
-            name=backend_config['name'],
-            storage_type=backend_config['storage_type'],
-            connection_string=json.dumps(backend_config),
-            capacity_gb=backend_config.get('capacity_gb', 0),
-            encryption_enabled=True,
-            settings=backend_config
-        )
-        db.add(db_backend)
-        db.commit()
-        db.refresh(db_backend)
-        
-        logger.info(f"Created storage backend: {backend_id}")
-        return {
-            "id": backend_id,
-            "name": backend.name,
-            "storage_type": backend.storage_type,
-            "status": "connected",
-            "database_id": db_backend.id
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating storage backend: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/v1/storage/backends/{backend_id}")
-async def delete_storage_backend(
-    backend_id: str,
-    db: Session = Depends(get_db)
-):
-    """Delete a storage backend"""
-    try:
-        storage_manager = app.state.storage_manager
-        
-        backend = storage_manager.get_backend(backend_id)
-        if not backend:
-            raise HTTPException(status_code=404, detail="Storage backend not found")
-        
-        # Disconnect backend
-        await backend.disconnect()
-        
-        # Remove from storage manager
-        del storage_manager.backends[backend_id]
-        
-        # Remove from database
-        db_backend = db.query(BackupRepository).filter(
-            BackupRepository.name == backend.name
-        ).first()
-        if db_backend:
-            db.delete(db_backend)
-            db.commit()
-        
-        logger.info(f"Deleted storage backend: {backend_id}")
-        return {"message": "Storage backend deleted"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting storage backend: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/storage/backends/{backend_id}/test")
-async def test_storage_backend(backend_id: str):
-    """Test storage backend connection"""
-    try:
-        storage_manager = app.state.storage_manager
-        backend = storage_manager.get_backend(backend_id)
-        
-        if not backend:
-            raise HTTPException(status_code=404, detail="Storage backend not found")
-        
-        test_result = await backend.test_connection()
-        return test_result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error testing storage backend: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/api/v1/storage/backups")
-async def list_all_backups():
-    """List all backups across all storage backends"""
+async def list_all_backups(db: Session = Depends(get_db)):
+    """List all backups from storage backends and database records"""
     try:
+        # Get backups from storage manager
         storage_manager = app.state.storage_manager
-        all_backups = await storage_manager.list_all_backups()
+        storage_backups = await storage_manager.list_all_backups()
         
-        # Flatten the results
-        flattened_backups = []
-        for backend_id, backups in all_backups.items():
+        # Get backup records from database
+        backup_records = db.query(BackupRecord).filter(
+            BackupRecord.status == "completed"
+        ).all()
+        
+        # Combine and format backup information
+        all_backups = []
+        
+        # Add storage backups
+        for backend_id, backups in storage_backups.items():
             for backup in backups:
                 backup['storage_backend_id'] = backend_id
-                flattened_backups.append(backup)
+                all_backups.append(backup)
+        
+        # Add database backup records (for backups that might not be in storage manager)
+        for record in backup_records:
+            # Check if this backup is already in storage results
+            backup_exists = any(
+                b.get('backup_id') == record.backup_id for b in all_backups
+            )
+            
+            if not backup_exists and record.record_metadata:
+                # Create backup entry from database record
+                metadata = record.record_metadata or {}
+                backup_info = {
+                    "backup_id": record.backup_id,
+                    "job_id": record.job_id,
+                    "vm_id": record.vm_id,
+                    "vm_name": metadata.get("vm_name", record.vm_id),
+                    "platform": metadata.get("platform", "unknown"),
+                    "backup_type": metadata.get("backup_type", record.backup_type.value if record.backup_type else "unknown"),
+                    "created_at": record.start_time.isoformat() if record.start_time else None,
+                    "size_mb": record.size_mb or 0,
+                    "file_path": record.file_path,
+                    "compressed": metadata.get("compressed", False),
+                    "encrypted": metadata.get("encrypted", False),
+                    "status": record.status,
+                    "storage_backend_id": "local"
+                }
+                all_backups.append(backup_info)
         
         # Sort by creation date
-        flattened_backups.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        all_backups.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
-        return flattened_backups
+        return all_backups
         
     except Exception as e:
         logger.error(f"Error listing all backups: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# VM Restore Endpoints
+# NEW: VM Restore Endpoints
 @app.post("/api/v1/restore/instant")
 async def instant_restore_vm(
     restore_request: dict,
@@ -995,7 +923,7 @@ async def instant_restore_vm(
             backup_type=BackupType.FULL,
             status="running",
             start_time=datetime.now(),
-            record_metadata={"operation": "restore", "source_backup": backup_id}
+            record_metadata={"operation": "instant_restore", "source_backup": backup_id, "target_platform": target_platform}
         )
         db.add(restore_record)
         db.commit()
@@ -1039,12 +967,10 @@ async def perform_instant_restore(backup_id: str, target_platform: PlatformType,
         if restore_record:
             restore_record.status = "completed"
             restore_record.end_time = datetime.now()
-            restore_record.record_metadata = {
-                "operation": "restore",
-                "source_backup": backup_id,
+            restore_record.record_metadata.update({
                 "new_vm_id": result.get("new_vm_id"),
                 "restore_time": result.get("restore_time")
-            }
+            })
         
         db.commit()
         logger.info(f"Instant restore completed: {result}")
@@ -1238,7 +1164,7 @@ async def get_statistics(db: Session = Depends(get_db)):
         logger.error(f"Error getting statistics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Authentication endpoints (keeping existing...)
+# Authentication endpoints (keeping existing implementation...)
 @app.post("/api/v1/auth/register")
 async def register_user(
     user_data: UserCreate,
