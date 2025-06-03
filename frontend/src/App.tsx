@@ -1386,7 +1386,7 @@ const PlatformConnector: React.FC<{
 };
 
 // ENHANCED Main Dashboard Component with Auto-refresh and Proper Status Tracking
-const MIVUBackupDashboard: React.FC = () => {
+const TURBOBackupDashboard: React.FC = () => {
   const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'backups' | 'platforms'>('dashboard');
   const [vmSubTab, setVmSubTab] = useState<'all' | 'vmware' | 'proxmox' | 'xcpng' | 'ubuntu'>('all');
@@ -1753,7 +1753,7 @@ const MIVUBackupDashboard: React.FC = () => {
               <div className="flex items-center space-x-3">
                 <Shield className="text-blue-400" size={32} />
                 <div>
-                  <h1 className="text-xl font-bold text-white">MIVU Backup Solution</h1>
+                  <h1 className="text-xl font-bold text-white">TURBO Backup Solution</h1>
                   <p className="text-slate-400 text-xs">Enterprise Protection System</p>
                 </div>
               </div>
@@ -2511,7 +2511,7 @@ const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-white">
-                MIVU Backup Solution
+                TURBO Backup Solution
               </h1>
               <p className="text-slate-400 text-sm mt-2">Please login to continue</p>
             </div>
@@ -2538,7 +2538,7 @@ const App: React.FC = () => {
   return (
     <AuthProvider>
       <AuthGuard>
-        <MIVUBackupDashboard />
+        <TURBOBackupDashboard />
       </AuthGuard>
     </AuthProvider>
   );
