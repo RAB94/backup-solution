@@ -1,4 +1,4 @@
-# main.py - Updated with Production Backup Engine Integration
+# main.py - Fixed version with proper backup listing and status updates
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,27 +40,23 @@ from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
 
-# Encryption for storing sensitive connection data
+# Encryption for storing sensitive connection data (keeping existing implementation)
 class ConnectionEncryption:
     def __init__(self):
-        # In production, store this securely (environment variable, vault, etc.)
         self.key = os.getenv('ENCRYPTION_KEY', 'your-encryption-key-here-change-in-production')
         if len(self.key) < 32:
-            # Generate a simple key for development
             self.key = base64.urlsafe_b64encode(b'dev-key-32-chars-long-change-me!').decode()[:32]
         self.cipher = Fernet(base64.urlsafe_b64encode(self.key.encode()[:32]))
     
     def encrypt(self, data: str) -> str:
-        """Encrypt sensitive data"""
         return self.cipher.encrypt(data.encode()).decode()
     
     def decrypt(self, encrypted_data: str) -> str:
-        """Decrypt sensitive data"""
         return self.cipher.decrypt(encrypted_data.encode()).decode()
 
 encryption = ConnectionEncryption()
 
-# Platform Connection Manager
+# Platform Connection Manager (keeping existing implementation)
 class PlatformConnectionManager:
     def __init__(self, connectors: Dict[PlatformType, Any]):
         self.connectors = connectors
@@ -69,18 +65,15 @@ class PlatformConnectionManager:
     async def save_connection(self, db: Session, platform: str, connection_data: Dict[str, Any]) -> PlatformConnection:
         """Save platform connection to database"""
         try:
-            # Encrypt sensitive fields
             encrypted_password = encryption.encrypt(connection_data.get('password', ''))
             encrypted_ssh_key = encryption.encrypt(connection_data.get('ssh_key_path', ''))
             
-            # Check if connection already exists
             existing = db.query(PlatformConnection).filter(
                 PlatformConnection.platform == PlatformType(platform),
                 PlatformConnection.host == connection_data['host']
             ).first()
             
             if existing:
-                # Update existing connection
                 existing.username = connection_data['username']
                 existing.password_encrypted = encrypted_password
                 existing.port = connection_data['port']
@@ -95,7 +88,6 @@ class PlatformConnectionManager:
                 db.refresh(existing)
                 return existing
             else:
-                # Create new connection
                 new_connection = PlatformConnection(
                     name=f"{platform}-{connection_data['host']}",
                     platform=PlatformType(platform),
@@ -136,7 +128,6 @@ class PlatformConnectionManager:
                     platform = conn.platform.value
                     logger.info(f"Restoring connection to {platform} ({conn.host})")
                     
-                    # Decrypt connection data
                     password = encryption.decrypt(conn.password_encrypted) if conn.password_encrypted else ''
                     ssh_key_path = ''
                     use_key = False
@@ -156,7 +147,6 @@ class PlatformConnectionManager:
                         'ssh_key_path': ssh_key_path
                     }
                     
-                    # Attempt to reconnect
                     if platform == 'ubuntu':
                         connector = self.connectors['ubuntu']
                     else:
@@ -166,18 +156,15 @@ class PlatformConnectionManager:
                     if success:
                         restored[platform] = True
                         self.active_connections[platform] = conn
-                        # Update last connected time
                         conn.last_connected = datetime.now()
                         logger.info(f"✅ Successfully restored {platform} connection")
                         
-                        # Automatically discover and save VMs after successful connection
                         try:
                             await self._discover_and_save_vms(db, platform, connector)
                         except Exception as vm_error:
                             logger.warning(f"Failed to discover VMs for {platform}: {vm_error}")
                     else:
                         logger.warning(f"❌ Failed to restore {platform} connection")
-                        # Mark as inactive but don't delete
                         conn.is_active = False
                         
                 except Exception as e:
@@ -204,7 +191,6 @@ class PlatformConnectionManager:
                 ).first()
                 
                 if existing_vm:
-                    # Update existing VM
                     existing_vm.name = vm_data['name']
                     existing_vm.host = vm_data['host']
                     existing_vm.cpu_count = vm_data['cpu_count']
@@ -214,7 +200,6 @@ class PlatformConnectionManager:
                     existing_vm.power_state = vm_data['power_state']
                     existing_vm.updated_at = datetime.now()
                 else:
-                    # Create new VM record
                     new_vm = VirtualMachine(
                         vm_id=vm_data['vm_id'],
                         name=vm_data['name'],
@@ -234,7 +219,7 @@ class PlatformConnectionManager:
         except Exception as e:
             logger.error(f"Failed to discover/save VMs for {platform}: {e}")
 
-# Backup Job Scheduler
+# Enhanced Backup Job Scheduler with proper status updates
 class BackupJobScheduler:
     def __init__(self, backup_engine: BackupEngine):
         self.backup_engine = backup_engine
@@ -242,28 +227,23 @@ class BackupJobScheduler:
         self.running = False
         
     def start(self):
-        """Start the scheduler"""
         self.running = True
         logger.info("Backup job scheduler started")
         
     def stop(self):
-        """Stop the scheduler"""
         self.running = False
         logger.info("Backup job scheduler stopped")
         
     def schedule_job(self, backup_job):
-        """Schedule a backup job"""
         self.scheduled_jobs[backup_job.id] = backup_job
         logger.info(f"Scheduled backup job: {backup_job.name} (ID: {backup_job.id})")
         
     def remove_job(self, job_id: int):
-        """Remove a scheduled job"""
         if job_id in self.scheduled_jobs:
             del self.scheduled_jobs[job_id]
             logger.info(f"Removed scheduled job: {job_id}")
             
     async def run_job(self, job_id: int) -> Dict[str, Any]:
-        """Execute a specific backup job"""
         if job_id not in self.scheduled_jobs:
             raise Exception(f"Job {job_id} not found in scheduler")
             
@@ -381,17 +361,58 @@ async def root():
 
 @app.get("/api/v1/health")
 async def health_check():
+    """Enhanced health check with actual status reporting"""
     platform_status = getattr(app.state, 'platform_status', {})
-    storage_stats = await app.state.storage_manager.get_storage_statistics()
+    
+    # Test storage manager health
+    storage_health = {"status": "unknown", "message": "Storage manager not initialized"}
+    storage_stats = {"total_backends": 0, "connected_backends": 0, "total_capacity_gb": 0, "total_available_gb": 0}
+    
+    if hasattr(app.state, 'storage_manager'):
+        try:
+            storage_stats = await app.state.storage_manager.get_storage_statistics()
+            if storage_stats["connected_backends"] > 0:
+                storage_health = {"status": "healthy", "message": f"{storage_stats['connected_backends']} backends connected"}
+            else:
+                storage_health = {"status": "error", "message": "No storage backends connected"}
+        except Exception as e:
+            storage_health = {"status": "error", "message": f"Storage error: {e}"}
+    
+    # Test database health
+    db_health = {"status": "unknown", "message": "Database not tested"}
+    try:
+        db = next(get_db())
+        user_count = db.query(User).count()
+        db.close()
+        db_health = {"status": "healthy", "message": f"Database connected ({user_count} users)"}
+    except Exception as e:
+        db_health = {"status": "error", "message": f"Database error: {e}"}
+    
+    # Test backup engine health
+    engine_health = {"status": "unknown", "message": "Backup engine not tested"}
+    if hasattr(app.state, 'backup_engine'):
+        try:
+            active_jobs = app.state.backup_engine.get_all_active_jobs()
+            engine_health = {"status": "healthy", "message": f"Engine running ({len(active_jobs)} active jobs)"}
+        except Exception as e:
+            engine_health = {"status": "error", "message": f"Engine error: {e}"}
+    
+    # Test scheduler health
+    scheduler_health = {"status": "unknown", "message": "Scheduler not tested"}
+    if hasattr(app.state, 'scheduler') and app.state.scheduler.running:
+        scheduled_count = len(app.state.scheduler.scheduled_jobs)
+        scheduler_health = {"status": "healthy", "message": f"Scheduler active ({scheduled_count} jobs)"}
+    else:
+        scheduler_health = {"status": "error", "message": "Scheduler not running"}
     
     return {
-        "status": "healthy",
+        "status": "healthy" if all(h.get("status") == "healthy" for h in [storage_health, db_health, engine_health, scheduler_health]) else "warning",
         "timestamp": datetime.now(),
         "services": {
-            "database": "connected",
-            "backup_engine": "running",
-            "scheduler": "active",
-            "storage_manager": "running"
+            "database": db_health,
+            "backup_engine": engine_health,
+            "scheduler": scheduler_health,
+            "storage_manager": storage_health
         },
         "platform_connections": platform_status,
         "storage_backends": {
@@ -405,10 +426,33 @@ async def health_check():
 # Platform Management Endpoints
 @app.get("/api/v1/platforms/status")
 async def get_platform_status():
-    """Get current platform connection status"""
-    return getattr(app.state, 'platform_status', {
+    """Get current platform connection status with actual connectivity"""
+    status = getattr(app.state, 'platform_status', {
         'vmware': False, 'proxmox': False, 'xcpng': False, 'ubuntu': False
     })
+    
+    # Test actual connectivity for each platform
+    actual_status = {}
+    connectors = getattr(app.state, 'connectors', {})
+    
+    for platform in ['vmware', 'proxmox', 'xcpng', 'ubuntu']:
+        try:
+            if platform == 'ubuntu':
+                connector = connectors.get('ubuntu')
+            else:
+                connector = connectors.get(PlatformType(platform))
+            
+            if connector and hasattr(connector, 'connected'):
+                actual_status[platform] = connector.connected
+            else:
+                actual_status[platform] = False
+        except Exception:
+            actual_status[platform] = False
+    
+    # Update app state with actual status
+    app.state.platform_status = actual_status
+    
+    return actual_status
 
 @app.post("/api/v1/platforms/{platform_type}/connect")
 async def connect_platform(
@@ -534,7 +578,7 @@ async def get_all_vms(db: Session = Depends(get_db)) -> List[dict]:
         logger.error(f"Error getting all VMs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Enhanced Backup Jobs Management
+# Enhanced Backup Jobs Management with proper status updates
 @app.post("/api/v1/backup-jobs")
 async def create_backup_job(
     job_data: dict,
@@ -618,7 +662,7 @@ async def list_backup_jobs(
     limit: int = 100,
     db: Session = Depends(get_db)
 ) -> List[dict]:
-    """List all backup jobs with enhanced information"""
+    """List all backup jobs with enhanced information and real-time status"""
     try:
         jobs = db.query(BackupJob).offset(skip).limit(limit).all()
         result = []
@@ -631,8 +675,14 @@ async def list_backup_jobs(
             
             # Get job status from backup engine
             job_status = None
+            current_engine_status = "idle"
             if hasattr(app.state, 'backup_engine'):
                 job_status = app.state.backup_engine.get_job_status(job.id)
+                if job_status:
+                    current_engine_status = job_status.get("status", "idle")
+            
+            # Use engine status if available, otherwise database status
+            display_status = current_engine_status if job_status else job.status.value
             
             result.append({
                 "id": job.id,
@@ -642,7 +692,7 @@ async def list_backup_jobs(
                 "vm_name": vm.name if vm else job.vm_id,
                 "platform": job.platform.value,
                 "backup_type": job.backup_type.value,
-                "status": job.status.value,
+                "status": display_status,
                 "schedule_cron": job.schedule_cron,
                 "retention_days": job.retention_days,
                 "compression_enabled": job.compression_enabled,
@@ -664,7 +714,7 @@ async def run_backup_job(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Manually trigger a backup job with real backup execution"""
+    """Manually trigger a backup job with real backup execution and proper status updates"""
     try:
         job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
         if not job:
@@ -698,28 +748,27 @@ async def run_backup_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/backup-jobs/{job_id}/status")
-async def get_backup_job_status(job_id: int):
+async def get_backup_job_status(job_id: int, db: Session = Depends(get_db)):
     """Get real-time status of a backup job"""
     try:
+        # First check engine status
         if hasattr(app.state, 'backup_engine'):
             status = app.state.backup_engine.get_job_status(job_id)
             if status:
                 return status
         
         # Fallback to database status
-        db = next(get_db())
-        try:
-            job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
-            if not job:
-                raise HTTPException(status_code=404, detail="Backup job not found")
-            
-            return {
-                "job_id": job_id,
-                "status": job.status.value,
-                "last_run": job.last_run.isoformat() if job.last_run else None
-            }
-        finally:
-            db.close()
+        job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Backup job not found")
+        
+        return {
+            "job_id": job_id,
+            "status": job.status.value,
+            "last_run": job.last_run.isoformat() if job.last_run else None,
+            "progress": 0,
+            "current_operation": "Idle"
+        }
             
     except HTTPException:
         raise
@@ -755,7 +804,7 @@ async def delete_backup_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def execute_backup_job(job_id: int):
-    """Execute backup job using the production backup engine"""
+    """Execute backup job using the production backup engine with proper status updates"""
     db = next(get_db())
     try:
         scheduler = app.state.scheduler
@@ -878,45 +927,94 @@ async def get_storage_statistics():
         logger.error(f"Error getting storage statistics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Enhanced Backup and Restore Endpoints
+# Enhanced Backup and Restore Endpoints with proper listing
 @app.get("/api/v1/storage/backups")
 async def list_all_backups():
-    """List all backups from all storage backends"""
+    """FIXED: List all backups from all storage backends with proper database integration"""
     try:
-        storage_manager = app.state.storage_manager
-        all_backups_by_backend = await storage_manager.list_all_backups()
-        
-        # Flatten the results and add database information
-        all_backups = []
+        # Get backups from both storage backends AND database
         db = next(get_db())
         try:
-            for backend_id, backups in all_backups_by_backend.items():
-                for backup in backups:
-                    # Enhance with database record if available
-                    backup_id = backup.get('backup_id')
-                    if backup_id:
-                        db_record = db.query(BackupRecord).filter(
-                            BackupRecord.backup_id == backup_id
-                        ).first()
-                        
-                        if db_record:
-                            backup.update({
-                                "vm_name": db_record.record_metadata.get("vm_name") if db_record.record_metadata else None,
-                                "job_id": db_record.job_id,
-                                "checksum": db_record.checksum,
-                                "compressed_size_mb": db_record.compressed_size_mb
-                            })
+            # Get all backup records from database
+            db_records = db.query(BackupRecord).filter(
+                BackupRecord.status == "completed"
+            ).all()
+            
+            all_backups = []
+            
+            # Process database records first
+            for record in db_records:
+                try:
+                    # Parse metadata if available
+                    vm_name = record.vm_id
+                    platform = "unknown"
+                    backup_type = "unknown"
+                    created_at = record.start_time
                     
-                    backup["storage_backend_id"] = backend_id
-                    all_backups.append(backup)
+                    if record.record_metadata:
+                        metadata = record.record_metadata
+                        vm_name = metadata.get("vm_name", record.vm_id)
+                        platform = metadata.get("platform", "unknown")
+                        backup_type = metadata.get("backup_type", "unknown")
+                        created_at_str = metadata.get("created_at")
+                        if created_at_str:
+                            try:
+                                created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                            except:
+                                created_at = record.start_time
+                    
+                    backup_info = {
+                        "backup_id": record.backup_id,
+                        "job_id": record.job_id,
+                        "vm_id": record.vm_id,
+                        "vm_name": vm_name,
+                        "platform": platform,
+                        "backup_type": backup_type,
+                        "size_mb": record.size_mb or 0,
+                        "compressed_size_mb": record.compressed_size_mb,
+                        "file_path": record.file_path,
+                        "checksum": record.checksum,
+                        "status": record.status,
+                        "created_at": created_at.isoformat() if created_at else None,
+                        "storage_backend_id": record.record_metadata.get("storage_backend") if record.record_metadata else "default_local",
+                        "compressed": record.record_metadata.get("compressed", False) if record.record_metadata else False,
+                        "encrypted": record.record_metadata.get("encrypted", False) if record.record_metadata else False
+                    }
+                    all_backups.append(backup_info)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to process backup record {record.backup_id}: {e}")
+                    continue
+            
+            # Also get backups from storage backends (in case of orphaned files)
+            if hasattr(app.state, 'storage_manager'):
+                try:
+                    storage_backups = await app.state.storage_manager.list_all_backups()
+                    
+                    # Add storage backups that aren't in database
+                    db_backup_ids = {backup["backup_id"] for backup in all_backups}
+                    
+                    for backend_id, backend_backups in storage_backups.items():
+                        for storage_backup in backend_backups:
+                            backup_id = storage_backup.get("backup_id")
+                            if backup_id and backup_id not in db_backup_ids:
+                                # This backup is in storage but not in database
+                                storage_backup["storage_backend_id"] = backend_id
+                                storage_backup["status"] = "orphaned"
+                                all_backups.append(storage_backup)
+                                
+                except Exception as e:
+                    logger.warning(f"Failed to get storage backups: {e}")
+            
+            # Sort by creation date (newest first)
+            all_backups.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+            
+            logger.info(f"Retrieved {len(all_backups)} total backups")
+            return all_backups
+            
         finally:
             db.close()
-        
-        # Sort by creation date
-        all_backups.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-        
-        return all_backups
-        
+            
     except Exception as e:
         logger.error(f"Error listing all backups: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1032,10 +1130,10 @@ async def perform_file_restore_task(backup_id: str, file_paths: List[str], targe
     except Exception as e:
         logger.error(f"❌ File restore failed: {e}")
 
-# Other endpoints remain the same...
+# Enhanced Statistics endpoint
 @app.get("/api/v1/statistics")
 async def get_statistics(db: Session = Depends(get_db)):
-    """Get comprehensive backup system statistics"""
+    """Get comprehensive backup system statistics with actual data"""
     try:
         # Get VM counts
         total_vms = db.query(VirtualMachine).count()
@@ -1055,9 +1153,14 @@ async def get_statistics(db: Session = Depends(get_db)):
             BackupJob.last_run >= yesterday
         ).count()
         
-        # Calculate success rate
-        if total_jobs > 0:
-            success_rate = f"{(completed_jobs / total_jobs) * 100:.1f}%"
+        # Calculate success rate based on backup records
+        total_backup_attempts = db.query(BackupRecord).count()
+        successful_backups = db.query(BackupRecord).filter(
+            BackupRecord.status == "completed"
+        ).count()
+        
+        if total_backup_attempts > 0:
+            success_rate = f"{(successful_backups / total_backup_attempts) * 100:.1f}%"
         else:
             success_rate = "N/A"
         
@@ -1066,12 +1169,18 @@ async def get_statistics(db: Session = Depends(get_db)):
         connected_platforms = sum(platform_status.values())
         
         # Calculate storage used from backup records
-        backup_records = db.query(BackupRecord).all()
+        backup_records = db.query(BackupRecord).filter(
+            BackupRecord.status == "completed"
+        ).all()
         total_storage_mb = sum(record.size_mb or 0 for record in backup_records)
         total_storage_gb = total_storage_mb / 1024 if total_storage_mb > 0 else 0
         
         # Get storage statistics
-        storage_stats = await app.state.storage_manager.get_storage_statistics()
+        storage_stats = {"total_backends": 0, "storage_capacity_gb": 0, "storage_available_gb": 0}
+        try:
+            storage_stats = await app.state.storage_manager.get_storage_statistics()
+        except Exception as e:
+            logger.warning(f"Failed to get storage statistics: {e}")
         
         return {
             "total_backup_jobs": total_jobs,
@@ -1081,15 +1190,17 @@ async def get_statistics(db: Session = Depends(get_db)):
             "total_backups_size": f"{total_storage_gb:.1f} GB",
             "last_24h_jobs": recent_jobs,
             "success_rate": success_rate,
-            "storage_backends": storage_stats["total_backends"],
-            "storage_capacity_gb": storage_stats["total_capacity_gb"],
-            "storage_available_gb": storage_stats["total_available_gb"]
+            "storage_backends": storage_stats.get("total_backends", 0),
+            "storage_capacity_gb": storage_stats.get("total_capacity_gb", 0),
+            "storage_available_gb": storage_stats.get("total_available_gb", 0),
+            "total_backup_attempts": total_backup_attempts,
+            "successful_backups": successful_backups
         }
     except Exception as e:
         logger.error(f"Error getting statistics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Authentication endpoints (keeping existing auth endpoints)...
+# Authentication endpoints (keeping existing)
 @app.post("/api/v1/auth/login")
 async def login_user(
     login_data: UserLogin,

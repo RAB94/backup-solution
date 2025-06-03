@@ -1,4 +1,4 @@
-// Updated App.tsx with comprehensive restore functionality and backup listing
+// Fixed App.tsx with auto-refresh and proper status updates
 
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { 
@@ -29,7 +29,7 @@ import {
   Archive
 } from 'lucide-react';
 
-// Types (keeping existing types and adding new ones...)
+// Types (keeping existing types...)
 interface User {
   id: number;
   username: string;
@@ -116,6 +116,10 @@ interface DashboardStats {
   total_backups_size: string;
   last_24h_jobs: number;
   success_rate: string;
+  connected_platforms: number;
+  storage_backends: number;
+  storage_capacity_gb: number;
+  storage_available_gb: number;
 }
 
 interface PlatformStatus {
@@ -125,21 +129,36 @@ interface PlatformStatus {
   ubuntu: boolean;
 }
 
-// API Service with new restore methods
+interface HealthStatus {
+  status: string;
+  timestamp: string;
+  services: {
+    database: { status: string; message: string };
+    backup_engine: { status: string; message: string };
+    scheduler: { status: string; message: string };
+    storage_manager: { status: string; message: string };
+  };
+  platform_connections: PlatformStatus;
+  storage_backends: {
+    total: number;
+    connected: number;
+    total_capacity_gb: number;
+    available_gb: number;
+  };
+}
+
+// Enhanced API Service with auto-refresh capabilities
 class APIService {
   private baseURL: string;
   private authToken: string | null = null;
 
   constructor() {
-    // Determine API URL based on current host
     const currentHost = window.location.hostname;
     if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
       this.baseURL = 'http://localhost:8000/api/v1';
     } else {
-      // Use the same IP as the frontend but port 8000 for API
       this.baseURL = `http://${currentHost}:8000/api/v1`;
     }
-    
     console.log('API Base URL:', this.baseURL);
   }
 
@@ -190,7 +209,7 @@ class APIService {
     }
   }
 
-  // Authentication methods (keeping existing...)
+  // Authentication methods
   async login(username: string, password: string) {
     return this.request('/auth/login', {
       method: 'POST',
@@ -215,7 +234,7 @@ class APIService {
     return this.request('/auth/me');
   }
 
-  // Backup Jobs methods (keeping existing...)
+  // Enhanced methods with better error handling
   async getBackupJobs(): Promise<BackupJob[]> {
     return this.request('/backup-jobs');
   }
@@ -233,6 +252,10 @@ class APIService {
     });
   }
 
+  async getBackupJobStatus(jobId: number) {
+    return this.request(`/backup-jobs/${jobId}/status`);
+  }
+
   async deleteBackupJob(jobId: number) {
     return this.request(`/backup-jobs/${jobId}`, {
       method: 'DELETE',
@@ -241,6 +264,10 @@ class APIService {
 
   async getStatistics(): Promise<DashboardStats> {
     return this.request('/statistics');
+  }
+
+  async getHealthStatus(): Promise<HealthStatus> {
+    return this.request('/health');
   }
 
   async connectPlatform(platform: string, connectionData: any) {
@@ -254,11 +281,11 @@ class APIService {
     return this.request('/vms');
   }
 
-  async getPlatformStatus() {
+  async getPlatformStatus(): Promise<PlatformStatus> {
     return this.request('/platforms/status');
   }
 
-  // NEW: Backup and Restore methods
+  // Enhanced backup and restore methods
   async getAllBackups(): Promise<Backup[]> {
     return this.request('/storage/backups');
   }
@@ -303,7 +330,7 @@ class APIService {
 
 const api = new APIService();
 
-// Authentication Context (keeping existing...)
+// Authentication Context (keeping existing implementation...)
 const AuthContext = createContext<AuthContextType | null>(null);
 
 const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -379,7 +406,7 @@ const useAuth = () => {
   return context;
 };
 
-// UI Components (keeping existing Card, Button, Modal, StatusIndicator, MetricCard...)
+// UI Components (keeping existing implementations but adding some enhancements...)
 const Card: React.FC<{
   children: React.ReactNode;
   className?: string;
@@ -476,9 +503,11 @@ const StatusIndicator: React.FC<{
     switch (status.toLowerCase()) {
       case 'completed':
       case 'success':
+      case 'healthy':
       case 'poweredon':
-        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'SUCCESS' };
-      case 'running':
+      case 'running':  // For VMs, running is good
+        return { color: 'text-emerald-400', bg: 'bg-emerald-400', label: 'HEALTHY' };
+      case 'running':  // For jobs, running is in progress
       case 'in progress':
         return { color: 'text-amber-400', bg: 'bg-amber-400', label: 'RUNNING' };
       case 'failed':
@@ -486,9 +515,11 @@ const StatusIndicator: React.FC<{
         return { color: 'text-red-400', bg: 'bg-red-400', label: 'FAILED' };
       case 'pending':
       case 'scheduled':
+      case 'warning':
         return { color: 'text-yellow-400', bg: 'bg-yellow-400', label: 'PENDING' };
       case 'paused':
       case 'stopped':
+      case 'unknown':
         return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'STOPPED' };
       default:
         return { color: 'text-slate-400', bg: 'bg-slate-400', label: 'UNKNOWN' };
@@ -515,13 +546,19 @@ const MetricCard: React.FC<{
   icon: React.ReactNode;
   trend?: string;
   trendDirection?: 'up' | 'down' | 'stable';
-}> = ({ title, value, icon, trend, trendDirection }) => (
+  status?: string;
+}> = ({ title, value, icon, trend, trendDirection, status }) => (
   <Card className="text-center">
     <div className="flex flex-col items-center space-y-3">
       <div className="text-blue-400 text-3xl">{icon}</div>
       <div>
         <p className="text-slate-400 text-sm uppercase tracking-wider">{title}</p>
         <p className="text-white text-2xl font-bold font-mono">{value}</p>
+        {status && (
+          <div className="mt-2">
+            <StatusIndicator status={status} showLabel={false} />
+          </div>
+        )}
         {trend && (
           <p className={`text-sm mt-1 ${
             trendDirection === 'up' ? 'text-emerald-400' : 
@@ -535,7 +572,10 @@ const MetricCard: React.FC<{
   </Card>
 );
 
-// NEW: Instant Restore Modal
+// Enhanced modals and components (keeping existing implementations...)
+// [All the modal components remain the same as in the original code]
+
+// Instant Restore Modal (keeping existing)
 const InstantRestoreModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -596,8 +636,8 @@ const InstantRestoreModal: React.FC<{
               </span>
             </div>
             <div>
-              <span className="text-slate-300">Encrypted:</span>
-              <span className="text-white ml-2">{backup.encrypted ? 'Yes' : 'No'}</span>
+              <span className="text-slate-300">Status:</span>
+              <span className="text-white ml-2">{backup.status || 'Available'}</span>
             </div>
           </div>
         </div>
@@ -672,7 +712,7 @@ const InstantRestoreModal: React.FC<{
   );
 };
 
-// NEW: File Restore Modal
+// File Restore Modal (keeping existing implementation)
 const FileRestoreModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -754,7 +794,7 @@ const FileRestoreModal: React.FC<{
   );
 };
 
-// NEW: Create Backup Job Modal (keeping existing implementation...)
+// Create Backup Job Modal (keeping existing implementation)
 const CreateBackupJobModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -1045,7 +1085,7 @@ const LoginForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   );
 };
 
-// VM Card component (keeping existing...)
+// VM Card component (keeping existing implementation...)
 const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) => void; onMonitor?: (vm: VM) => void }> = ({ vm, onBackup, onEdit, onMonitor }) => {
   const getPlatformIcon = (platform: string) => {
     switch (platform) {
@@ -1164,7 +1204,7 @@ const VMCard: React.FC<{ vm: VM; onBackup: (vm: VM) => void; onEdit?: (vm: VM) =
   );
 };
 
-// Platform Connector component (keeping existing implementation but simplified...)
+// Platform Connector component (keeping existing implementation...)
 const PlatformConnector: React.FC<{
   platform: PlatformType;
   onConnect: (platform: string, data: any) => void;
@@ -1345,7 +1385,7 @@ const PlatformConnector: React.FC<{
   );
 };
 
-// Main Dashboard Component with NEW Restore Tab
+// ENHANCED Main Dashboard Component with Auto-refresh and Proper Status Tracking
 const MIVUBackupDashboard: React.FC = () => {
   const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'vms' | 'jobs' | 'backups' | 'platforms'>('dashboard');
@@ -1357,8 +1397,13 @@ const MIVUBackupDashboard: React.FC = () => {
     total_vms_protected: 0,
     total_backups_size: '0 GB',
     last_24h_jobs: 0,
-    success_rate: '0%'
+    success_rate: '0%',
+    connected_platforms: 0,
+    storage_backends: 0,
+    storage_capacity_gb: 0,
+    storage_available_gb: 0
   });
+  const [healthStatus, setHealthStatus] = useState<HealthStatus | null>(null);
   const [vms, setVMs] = useState<VM[]>([]);
   const [backupJobs, setBackupJobs] = useState<BackupJob[]>([]);
   const [backups, setBackups] = useState<Backup[]>([]);
@@ -1380,40 +1425,104 @@ const MIVUBackupDashboard: React.FC = () => {
     ubuntu: false
   });
 
+  // Auto-refresh functionality
   useEffect(() => {
     loadInitialData();
     loadPlatformStatus();
+    loadHealthStatus();
+
+    // Set up auto-refresh intervals
+    const statsInterval = setInterval(() => {
+      loadStatistics();
+      loadHealthStatus();
+    }, 30000); // Every 30 seconds
+
+    const jobsInterval = setInterval(() => {
+      loadBackupJobs();
+    }, 10000); // Every 10 seconds for job status
+
+    const backupsInterval = setInterval(() => {
+      loadBackups();
+    }, 60000); // Every minute for backups
+
+    return () => {
+      clearInterval(statsInterval);
+      clearInterval(jobsInterval);
+      clearInterval(backupsInterval);
+    };
   }, []);
 
   const loadInitialData = async () => {
     setLoading(true);
     try {
-      // Load stats, VMs, backup jobs, and backups
-      const [statsData, allVMs, jobs, allBackups, restoreHistoryData] = await Promise.all([
-        api.getStatistics().catch(() => ({
-          total_backup_jobs: 0,
-          running_jobs: 0,
-          total_vms_protected: 0,
-          total_backups_size: '0 GB',
-          last_24h_jobs: 0,
-          success_rate: '0%'
-        })),
-        api.getAllVMs().catch(() => []),
-        api.getBackupJobs().catch(() => []),
-        api.getAllBackups().catch(() => []),
-        api.getRestoreHistory().catch(() => [])
+      await Promise.all([
+        loadStatistics(),
+        loadVMs(),
+        loadBackupJobs(),
+        loadBackups(),
+        loadRestoreHistory(),
+        loadPlatformStatus(),
+        loadHealthStatus()
       ]);
-
-      setStats(statsData);
-      setVMs(allVMs);
-      setBackupJobs(jobs);
-      setBackups(allBackups);
-      setRestoreHistory(restoreHistoryData);
-      
     } catch (error) {
       console.error('Failed to load initial data:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadStatistics = async () => {
+    try {
+      const statsData = await api.getStatistics();
+      setStats(statsData);
+    } catch (error) {
+      console.error('Failed to load statistics:', error);
+    }
+  };
+
+  const loadHealthStatus = async () => {
+    try {
+      const health = await api.getHealthStatus();
+      setHealthStatus(health);
+    } catch (error) {
+      console.error('Failed to load health status:', error);
+    }
+  };
+
+  const loadVMs = async () => {
+    try {
+      const allVMs = await api.getAllVMs();
+      setVMs(allVMs);
+    } catch (error) {
+      console.error('Failed to load VMs:', error);
+    }
+  };
+
+  const loadBackupJobs = async () => {
+    try {
+      const jobs = await api.getBackupJobs();
+      setBackupJobs(jobs);
+    } catch (error) {
+      console.error('Failed to load backup jobs:', error);
+    }
+  };
+
+  const loadBackups = async () => {
+    try {
+      const allBackups = await api.getAllBackups();
+      setBackups(allBackups);
+      console.log('Loaded backups:', allBackups);
+    } catch (error) {
+      console.error('Failed to load backups:', error);
+    }
+  };
+
+  const loadRestoreHistory = async () => {
+    try {
+      const restoreHistoryData = await api.getRestoreHistory();
+      setRestoreHistory(restoreHistoryData);
+    } catch (error) {
+      console.error('Failed to load restore history:', error);
     }
   };
 
@@ -1429,23 +1538,15 @@ const MIVUBackupDashboard: React.FC = () => {
 
   const refreshAllData = async () => {
     try {
-      const [allVMs, updatedStats, jobs, allBackups, restoreHistoryData] = await Promise.all([
-        api.getAllVMs(),
-        api.getStatistics(),
-        api.getBackupJobs(),
-        api.getAllBackups(),
-        api.getRestoreHistory()
+      await Promise.all([
+        loadVMs(),
+        loadStatistics(),
+        loadBackupJobs(),
+        loadBackups(),
+        loadRestoreHistory(),
+        loadPlatformStatus(),
+        loadHealthStatus()
       ]);
-      
-      setVMs(allVMs);
-      setStats(updatedStats);
-      setBackupJobs(jobs);
-      setBackups(allBackups);
-      setRestoreHistory(restoreHistoryData);
-      
-      // Reload platform status
-      await loadPlatformStatus();
-      
     } catch (error) {
       console.error('Failed to refresh data:', error);
     }
@@ -1491,13 +1592,10 @@ const MIVUBackupDashboard: React.FC = () => {
       await api.createBackupJob(jobData);
       
       // Refresh backup jobs list and stats
-      const [jobs, updatedStats] = await Promise.all([
-        api.getBackupJobs(),
-        api.getStatistics()
+      await Promise.all([
+        loadBackupJobs(),
+        loadStatistics()
       ]);
-      
-      setBackupJobs(jobs);
-      setStats(updatedStats);
       
       alert(`✅ Backup job "${jobData.name}" created successfully!`);
       
@@ -1511,16 +1609,42 @@ const MIVUBackupDashboard: React.FC = () => {
     try {
       await api.runBackupJob(jobId);
       
-      // Refresh jobs and stats to get updated status
-      const [jobs, updatedStats] = await Promise.all([
-        api.getBackupJobs(),
-        api.getStatistics()
-      ]);
-      
-      setBackupJobs(jobs);
-      setStats(updatedStats);
+      // Immediate refresh of jobs to show "running" status
+      await loadBackupJobs();
       
       alert(`✅ Backup job started successfully!`);
+      
+      // Set up a polling mechanism to check job completion
+      const pollJobStatus = async () => {
+        try {
+          const status = await api.getBackupJobStatus(jobId);
+          if (status.status === 'completed' || status.status === 'failed') {
+            // Final refresh when job completes
+            await Promise.all([
+              loadBackupJobs(),
+              loadStatistics(),
+              loadBackups() // Refresh backups list to show new backup
+            ]);
+            return true; // Stop polling
+          }
+          return false; // Continue polling
+        } catch (error) {
+          console.error('Error polling job status:', error);
+          return false;
+        }
+      };
+
+      // Poll every 5 seconds for up to 10 minutes
+      let pollCount = 0;
+      const maxPolls = 120; // 10 minutes
+      const pollInterval = setInterval(async () => {
+        pollCount++;
+        const completed = await pollJobStatus();
+        
+        if (completed || pollCount >= maxPolls) {
+          clearInterval(pollInterval);
+        }
+      }, 5000);
       
     } catch (error) {
       console.error('Failed to run backup job:', error);
@@ -1537,13 +1661,10 @@ const MIVUBackupDashboard: React.FC = () => {
       await api.deleteBackupJob(jobId);
       
       // Refresh jobs list and stats
-      const [jobs, updatedStats] = await Promise.all([
-        api.getBackupJobs(),
-        api.getStatistics()
+      await Promise.all([
+        loadBackupJobs(),
+        loadStatistics()
       ]);
-      
-      setBackupJobs(jobs);
-      setStats(updatedStats);
       
       alert(`✅ Backup job deleted successfully!`);
       
@@ -1560,8 +1681,7 @@ const MIVUBackupDashboard: React.FC = () => {
       alert('✅ Instant restore started successfully! Check the restore history for progress.');
       
       // Refresh restore history
-      const newRestoreHistory = await api.getRestoreHistory();
-      setRestoreHistory(newRestoreHistory);
+      await loadRestoreHistory();
       
     } catch (error) {
       console.error('Failed to start instant restore:', error);
@@ -1576,8 +1696,7 @@ const MIVUBackupDashboard: React.FC = () => {
       alert('✅ File restore started successfully! Check the restore history for progress.');
       
       // Refresh restore history
-      const newRestoreHistory = await api.getRestoreHistory();
-      setRestoreHistory(newRestoreHistory);
+      await loadRestoreHistory();
       
     } catch (error) {
       console.error('Failed to start file restore:', error);
@@ -1641,8 +1760,10 @@ const MIVUBackupDashboard: React.FC = () => {
             </div>
             <div className="flex items-center space-x-6">
               <div className="flex items-center space-x-3">
-                <StatusIndicator status="online" />
-                <span className="text-slate-400 text-sm">System Online</span>
+                <StatusIndicator status={healthStatus?.status || "unknown"} />
+                <span className="text-slate-400 text-sm">
+                  {healthStatus?.status === "healthy" ? "System Online" : "System Issues"}
+                </span>
               </div>
               <div className="text-slate-400 text-sm">
                 {new Date().toLocaleTimeString()}
@@ -1690,23 +1811,30 @@ const MIVUBackupDashboard: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <MetricCard
                 title="Protected VMs"
-                value={vms.length.toString()}
+                value={stats.total_vms_protected.toString()}
                 icon={<Server />}
+                status={stats.total_vms_protected > 0 ? "healthy" : "warning"}
               />
               <MetricCard
                 title="Active Jobs"
-                value={backupJobs.length.toString()}
+                value={stats.total_backup_jobs.toString()}
                 icon={<Shield />}
+                status={stats.running_jobs > 0 ? "running" : stats.total_backup_jobs > 0 ? "healthy" : "warning"}
+                trend={stats.running_jobs > 0 ? `${stats.running_jobs} running` : undefined}
               />
               <MetricCard
                 title="Total Backups"
                 value={backups.length.toString()}
                 icon={<Archive />}
+                status={backups.length > 0 ? "healthy" : "warning"}
               />
               <MetricCard
                 title="Success Rate"
                 value={stats.success_rate}
                 icon={<CheckCircle />}
+                status={stats.success_rate.includes('N/A') ? "unknown" : 
+                       parseFloat(stats.success_rate) > 90 ? "healthy" : 
+                       parseFloat(stats.success_rate) > 70 ? "warning" : "error"}
               />
             </div>
 
@@ -1714,18 +1842,19 @@ const MIVUBackupDashboard: React.FC = () => {
               <Card>
                 <h3 className="text-white text-lg font-medium mb-4">System Status</h3>
                 <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Backup Engine</span>
-                    <StatusIndicator status="online" />
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Database Connection</span>
-                    <StatusIndicator status="online" />
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-300">Platform Connections</span>
-                    <StatusIndicator status={Object.values(platformStatus).some(Boolean) ? "online" : "offline"} />
-                  </div>
+                  {healthStatus ? (
+                    Object.entries(healthStatus.services).map(([service, status]) => (
+                      <div key={service} className="flex justify-between items-center">
+                        <span className="text-slate-300 capitalize">{service.replace('_', ' ')}</span>
+                        <div className="flex items-center space-x-2">
+                          <StatusIndicator status={status.status} showLabel={false} />
+                          <span className="text-xs text-slate-400">{status.message}</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-slate-400">Loading system status...</div>
+                  )}
                 </div>
               </Card>
 
@@ -1734,10 +1863,85 @@ const MIVUBackupDashboard: React.FC = () => {
                 <div className="space-y-3">
                   {Object.entries(platformStatus).map(([platform, connected]) => (
                     <div key={platform} className="flex justify-between items-center">
-                      <span className="text-slate-300 capitalize">{platform} ({vms.filter(vm => vm.platform === platform).length} VMs)</span>
-                      <StatusIndicator status={connected ? "online" : "offline"} />
+                      <span className="text-slate-300 capitalize">
+                        {platform} ({vms.filter(vm => vm.platform === platform).length} VMs)
+                      </span>
+                      <StatusIndicator status={connected ? "healthy" : "warning"} showLabel={false} />
                     </div>
                   ))}
+                </div>
+              </Card>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">Storage Overview</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Backends</span>
+                    <span className="text-white font-mono">{stats.storage_backends}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Capacity</span>
+                    <span className="text-white font-mono">{stats.storage_capacity_gb} GB</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Available</span>
+                    <span className="text-white font-mono">{stats.storage_available_gb} GB</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Used Space</span>
+                    <span className="text-white font-mono">{stats.total_backups_size}</span>
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">Recent Activity</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Jobs (24h)</span>
+                    <span className="text-white font-mono">{stats.last_24h_jobs}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Running Jobs</span>
+                    <span className="text-white font-mono">{stats.running_jobs}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-300">Platforms</span>
+                    <span className="text-white font-mono">{stats.connected_platforms}/4</span>
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <h3 className="text-white text-lg font-medium mb-4">Quick Actions</h3>
+                <div className="space-y-3">
+                  <Button 
+                    onClick={() => setActiveTab('jobs')} 
+                    variant="primary" 
+                    size="sm"
+                    disabled={vms.length === 0}
+                  >
+                    <Plus size={16} className="mr-2" />
+                    Create Backup Job
+                  </Button>
+                  <Button 
+                    onClick={() => setActiveTab('platforms')} 
+                    variant="secondary" 
+                    size="sm"
+                  >
+                    <Settings size={16} className="mr-2" />
+                    Connect Platform
+                  </Button>
+                  <Button 
+                    onClick={refreshAllData} 
+                    variant="secondary" 
+                    size="sm"
+                  >
+                    <RefreshCw size={16} className="mr-2" />
+                    Refresh All Data
+                  </Button>
                 </div>
               </Card>
             </div>
@@ -1941,7 +2145,7 @@ const MIVUBackupDashboard: React.FC = () => {
           </div>
         )}
 
-        {/* NEW: Backups & Restore Tab */}
+        {/* Enhanced Backups & Restore Tab */}
         {activeTab === 'backups' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
@@ -2008,9 +2212,14 @@ const MIVUBackupDashboard: React.FC = () => {
                                 ID: {backup.backup_id.slice(0, 8)}...
                               </p>
                             </div>
-                            <span className="px-2 py-1 bg-slate-700 border border-blue-500 rounded text-xs font-mono text-blue-400">
-                              {backup.platform.toUpperCase()}
-                            </span>
+                            <div className="flex items-center space-x-2">
+                              <span className="px-2 py-1 bg-slate-700 border border-blue-500 rounded text-xs font-mono text-blue-400">
+                                {backup.platform.toUpperCase()}
+                              </span>
+                              {backup.status && backup.status !== 'completed' && (
+                                <StatusIndicator status={backup.status} showLabel={false} />
+                              )}
+                            </div>
                           </div>
                           
                           <div className="grid grid-cols-2 gap-3 text-sm">
@@ -2035,6 +2244,17 @@ const MIVUBackupDashboard: React.FC = () => {
                               </span>
                             </div>
                           </div>
+
+                          {(backup.compressed || backup.encrypted) && (
+                            <div className="flex space-x-3 text-xs">
+                              {backup.compressed && (
+                                <span className="text-emerald-400">✓ Compressed</span>
+                              )}
+                              {backup.encrypted && (
+                                <span className="text-blue-400">✓ Encrypted</span>
+                              )}
+                            </div>
+                          )}
 
                           <div className="flex space-x-2">
                             <Button 
